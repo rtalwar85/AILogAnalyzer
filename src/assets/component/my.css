@@ -1,0 +1,12 @@
+.navbar {
+  padding: 16px 240px;
+  background-color: #4d1111;
+  color: rgb(141, 43, 43);
+}
+
+.navbar-title {
+  font-family: 'Inter', sans-serif;
+  font-weight: 700;
+  font-size: 22px;
+  margin: 0;
+}
