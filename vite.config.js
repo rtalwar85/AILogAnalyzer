@@ -9,6 +9,7 @@ const DEFAULT_PATH_HISTORY_LIMIT = 30;
 const DEFAULT_WEB_SOLUTION_LIMIT = 5;
 const OPENAI_RESPONSES_API_URL = "https://api.openai.com/v1/responses";
 const DEFAULT_CHATGPT_WEB_SEARCH_MODEL = "gpt-4.1-mini";
+const DEFAULT_CLOUD_PROVIDERS = ["aws", "gcp", "azure"];
 
 function parseAllowedRoots(raw) {
   if (!raw) return [projectRoot];
@@ -55,6 +56,162 @@ function normalizePathList(paths, limit = DEFAULT_PATH_HISTORY_LIMIT) {
   }
 
   return out;
+}
+
+function normalizeCloudProviderName(value) {
+  const raw = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (!raw) return "";
+  if (raw === "aws" || raw === "s3") return "aws";
+  if (raw === "gcp" || raw === "gcs" || raw === "gs") return "gcp";
+  if (raw === "azure" || raw === "az" || raw === "blob") return "azure";
+  return "";
+}
+
+function parseCloudProviders(raw) {
+  if (!raw) return DEFAULT_CLOUD_PROVIDERS;
+  const parsed = raw
+    .split(/[;,\n]/)
+    .map((item) => normalizeCloudProviderName(item))
+    .filter(Boolean);
+  const unique = [...new Set(parsed)];
+  return unique.length ? unique : DEFAULT_CLOUD_PROVIDERS;
+}
+
+function parseCloudPath(rawPath) {
+  const normalized = normalizeInputPath(rawPath);
+  if (!normalized) return null;
+
+  const s3Match = normalized.match(/^s3:\/\/([^/]+)\/?(.*)$/i);
+  if (s3Match) {
+    return {
+      provider: "aws",
+      bucket: s3Match[1],
+      objectPath: s3Match[2] || "",
+      rawPath: normalized,
+    };
+  }
+
+  const gsMatch = normalized.match(/^gs:\/\/([^/]+)\/?(.*)$/i);
+  if (gsMatch) {
+    return {
+      provider: "gcp",
+      bucket: gsMatch[1],
+      objectPath: gsMatch[2] || "",
+      rawPath: normalized,
+    };
+  }
+
+  const azureExplicitMatch = normalized.match(/^(?:az|azure):\/\/([^/]+)\/([^/]+)\/?(.*)$/i);
+  if (azureExplicitMatch) {
+    return {
+      provider: "azure",
+      account: azureExplicitMatch[1],
+      container: azureExplicitMatch[2],
+      objectPath: azureExplicitMatch[3] || "",
+      rawPath: normalized,
+    };
+  }
+
+  const azureContainerMatch = normalized.match(/^(?:az|azure):\/\/([^/]+)\/?(.*)$/i);
+  if (azureContainerMatch) {
+    return {
+      provider: "azure",
+      account: "",
+      container: azureContainerMatch[1],
+      objectPath: azureContainerMatch[2] || "",
+      rawPath: normalized,
+    };
+  }
+
+  const azureUrlMatch = normalized.match(
+    /^https?:\/\/([^.]+)\.blob\.core\.windows\.net\/([^/?#]+)\/?([^?#]*)(?:\?([^#]+))?$/i
+  );
+  if (azureUrlMatch) {
+    return {
+      provider: "azure",
+      account: azureUrlMatch[1],
+      container: azureUrlMatch[2],
+      objectPath: azureUrlMatch[3] || "",
+      sasToken: azureUrlMatch[4] || "",
+      rawPath: normalized,
+      isHttpsUrl: true,
+    };
+  }
+
+  return null;
+}
+
+function toEpochMs(value) {
+  if (!value) return 0;
+  if (typeof value === "number") return value;
+  const date = value instanceof Date ? value : new Date(value);
+  const time = date.getTime();
+  return Number.isNaN(time) ? 0 : time;
+}
+
+async function streamLikeToBuffer(streamLike) {
+  if (!streamLike) return Buffer.alloc(0);
+  if (Buffer.isBuffer(streamLike)) return streamLike;
+  if (streamLike instanceof Uint8Array) return Buffer.from(streamLike);
+  if (typeof streamLike === "string") return Buffer.from(streamLike);
+
+  if (typeof streamLike.transformToByteArray === "function") {
+    const bytes = await streamLike.transformToByteArray();
+    return Buffer.from(bytes);
+  }
+
+  if (typeof streamLike.arrayBuffer === "function") {
+    return Buffer.from(await streamLike.arrayBuffer());
+  }
+
+  if (typeof streamLike.getReader === "function") {
+    const reader = streamLike.getReader();
+    const chunks = [];
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(Buffer.from(value));
+    }
+    return Buffer.concat(chunks);
+  }
+
+  const chunks = [];
+  for await (const chunk of streamLike) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks);
+}
+
+async function importAwsS3Sdk() {
+  try {
+    return await import("@aws-sdk/client-s3");
+  } catch {
+    throw new Error(
+      "AWS S3 support requires @aws-sdk/client-s3. Run: npm install @aws-sdk/client-s3"
+    );
+  }
+}
+
+async function importGcpStorageSdk() {
+  try {
+    return await import("@google-cloud/storage");
+  } catch {
+    throw new Error(
+      "GCP Cloud Storage support requires @google-cloud/storage. Run: npm install @google-cloud/storage"
+    );
+  }
+}
+
+async function importAzureBlobSdk() {
+  try {
+    return await import("@azure/storage-blob");
+  } catch {
+    throw new Error(
+      "Azure Blob support requires @azure/storage-blob. Run: npm install @azure/storage-blob"
+    );
+  }
 }
 
 function decodeHtmlEntities(value) {
@@ -388,6 +545,431 @@ async function readJsonBody(req) {
   return JSON.parse(body);
 }
 
+function normalizeSasToken(value) {
+  const token = String(value || "").trim();
+  if (!token) return "";
+  return token.startsWith("?") ? token.slice(1) : token;
+}
+
+function buildTailContent(contentBuffer, totalBytes, maxBytes) {
+  const safeTotal = Math.max(0, Number(totalBytes || 0));
+  const safeMax = Math.max(1, Number(maxBytes || 1));
+  const truncated = safeTotal > safeMax;
+  const prefix = truncated
+    ? `[truncated] showing last ${Math.min(safeTotal, safeMax)} bytes of ${safeTotal} bytes\n`
+    : "";
+  return {
+    content: prefix + contentBuffer.toString("utf8"),
+    totalBytes: safeTotal,
+    truncated,
+  };
+}
+
+function buildPayloadFromFileChunks(basePath, mode, filesWithContent) {
+  return {
+    path: basePath,
+    mode,
+    files: filesWithContent.map((file) => file.path),
+    content: filesWithContent.map((file) => `--- FILE: ${file.path} ---\n${file.content}`).join("\n\n"),
+    meta: filesWithContent.map((file) => ({
+      path: file.path,
+      totalBytes: file.totalBytes,
+      truncated: file.truncated,
+    })),
+  };
+}
+
+function selectRecentCloudObjects(items, maxFiles) {
+  const normalized = (items || []).filter((item) => item?.key && !String(item.key).endsWith("/"));
+  const logLike = normalized.filter((item) => isLogLikeFile(path.posix.basename(item.key)));
+  const source = logLike.length ? logLike : normalized;
+
+  return source
+    .sort((a, b) => toEpochMs(b.modifiedAt) - toEpochMs(a.modifiedAt))
+    .slice(0, Math.max(1, maxFiles));
+}
+
+function parseGcpCredentialsJson(raw) {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function isObjectNotFoundError(error) {
+  const name = String(error?.name || "").toLowerCase();
+  const code = String(error?.code || "").toLowerCase();
+  const status = Number(error?.statusCode || error?.status || error?.$metadata?.httpStatusCode || 0);
+  if (status === 404) return true;
+  if (name.includes("notfound")) return true;
+  if (code.includes("nosuchkey") || code.includes("notfound")) return true;
+  return false;
+}
+
+async function readS3ObjectTail(client, bucket, key, maxBytesPerFile) {
+  const { GetObjectCommand, HeadObjectCommand } = await importAwsS3Sdk();
+  const head = await client.send(new HeadObjectCommand({ Bucket: bucket, Key: key }));
+  const totalBytes = Number(head?.ContentLength || 0);
+  const bytesToRead = Math.min(totalBytes, Math.max(1, maxBytesPerFile));
+  const rangeStart = Math.max(0, totalBytes - bytesToRead);
+  const hasRange = totalBytes > 0;
+  const objectResponse = await client.send(
+    new GetObjectCommand({
+      Bucket: bucket,
+      Key: key,
+      ...(hasRange ? { Range: `bytes=${rangeStart}-${totalBytes - 1}` } : {}),
+    })
+  );
+  const buffer = await streamLikeToBuffer(objectResponse?.Body);
+  return buildTailContent(buffer, totalBytes, maxBytesPerFile);
+}
+
+async function listS3ObjectsByPrefix(client, bucket, prefix, maxFiles) {
+  const { ListObjectsV2Command } = await importAwsS3Sdk();
+  const results = [];
+  const scanCap = Math.max(maxFiles * 12, 120);
+  let continuationToken = undefined;
+
+  do {
+    const response = await client.send(
+      new ListObjectsV2Command({
+        Bucket: bucket,
+        Prefix: prefix || undefined,
+        ContinuationToken: continuationToken,
+        MaxKeys: Math.min(1000, scanCap - results.length),
+      })
+    );
+
+    const contents = Array.isArray(response?.Contents) ? response.Contents : [];
+    contents.forEach((item) => {
+      if (!item?.Key) return;
+      results.push({
+        key: item.Key,
+        size: Number(item.Size || 0),
+        modifiedAt: item.LastModified || 0,
+      });
+    });
+
+    continuationToken = response?.IsTruncated ? response?.NextContinuationToken : undefined;
+  } while (continuationToken && results.length < scanCap);
+
+  return selectRecentCloudObjects(results, maxFiles);
+}
+
+async function buildS3Payload(cloudRef, { cloudConfig, maxFiles, maxBytesPerFile }) {
+  const { S3Client } = await importAwsS3Sdk();
+  const client = new S3Client({
+    region: cloudConfig.awsRegion,
+  });
+  const key = cloudRef.objectPath || "";
+  const explicitPrefix = !key || key.endsWith("/");
+
+  if (!explicitPrefix) {
+    try {
+      const tail = await readS3ObjectTail(client, cloudRef.bucket, key, maxBytesPerFile);
+      const objectPath = `s3://${cloudRef.bucket}/${key}`;
+      return {
+        path: cloudRef.rawPath,
+        mode: "file",
+        files: [objectPath],
+        content: tail.content,
+        meta: [
+          {
+            path: objectPath,
+            totalBytes: tail.totalBytes,
+            truncated: tail.truncated,
+          },
+        ],
+      };
+    } catch (error) {
+      if (!isObjectNotFoundError(error)) throw error;
+    }
+  }
+
+  const prefix = explicitPrefix ? key : key;
+  const listed = await listS3ObjectsByPrefix(client, cloudRef.bucket, prefix, maxFiles);
+  if (!listed.length) {
+    throw new Error(`No log objects found for s3://${cloudRef.bucket}/${prefix}`);
+  }
+
+  const filesWithContent = await Promise.all(
+    listed.map(async (item) => {
+      const tail = await readS3ObjectTail(client, cloudRef.bucket, item.key, maxBytesPerFile);
+      const filePath = `s3://${cloudRef.bucket}/${item.key}`;
+      return {
+        path: filePath,
+        content: tail.content,
+        totalBytes: tail.totalBytes,
+        truncated: tail.truncated,
+      };
+    })
+  );
+
+  return buildPayloadFromFileChunks(cloudRef.rawPath, "directory", filesWithContent);
+}
+
+async function readGcsObjectTail(file, maxBytesPerFile) {
+  const [metadata] = await file.getMetadata();
+  const totalBytes = Number(metadata?.size || 0);
+  if (!totalBytes) {
+    return {
+      content: "",
+      totalBytes: 0,
+      truncated: false,
+    };
+  }
+
+  const bytesToRead = Math.min(totalBytes, Math.max(1, maxBytesPerFile));
+  const start = Math.max(0, totalBytes - bytesToRead);
+  const end = totalBytes - 1;
+  const buffer = await streamLikeToBuffer(file.createReadStream({ start, end }));
+  return buildTailContent(buffer, totalBytes, maxBytesPerFile);
+}
+
+async function listGcsObjectsByPrefix(bucket, prefix, maxFiles) {
+  const scanCap = Math.max(maxFiles * 12, 120);
+  const [files] = await bucket.getFiles({
+    prefix: prefix || undefined,
+    autoPaginate: false,
+    maxResults: scanCap,
+  });
+
+  const normalized = (files || []).map((file) => ({
+    key: file.name,
+    size: Number(file.metadata?.size || 0),
+    modifiedAt: file.metadata?.updated || file.metadata?.timeCreated || 0,
+  }));
+
+  return selectRecentCloudObjects(normalized, maxFiles);
+}
+
+async function buildGcsPayload(cloudRef, { cloudConfig, maxFiles, maxBytesPerFile }) {
+  const { Storage } = await importGcpStorageSdk();
+  const gcpCredentials = parseGcpCredentialsJson(cloudConfig.gcpCredentialsJson);
+  const storage = new Storage({
+    ...(cloudConfig.gcpProjectId ? { projectId: cloudConfig.gcpProjectId } : {}),
+    ...(gcpCredentials ? { credentials: gcpCredentials } : {}),
+  });
+
+  const bucket = storage.bucket(cloudRef.bucket);
+  const key = cloudRef.objectPath || "";
+  const explicitPrefix = !key || key.endsWith("/");
+
+  if (!explicitPrefix) {
+    const file = bucket.file(key);
+    try {
+      const tail = await readGcsObjectTail(file, maxBytesPerFile);
+      const objectPath = `gs://${cloudRef.bucket}/${key}`;
+      return {
+        path: cloudRef.rawPath,
+        mode: "file",
+        files: [objectPath],
+        content: tail.content,
+        meta: [
+          {
+            path: objectPath,
+            totalBytes: tail.totalBytes,
+            truncated: tail.truncated,
+          },
+        ],
+      };
+    } catch (error) {
+      if (!isObjectNotFoundError(error)) throw error;
+    }
+  }
+
+  const prefix = explicitPrefix ? key : key;
+  const listed = await listGcsObjectsByPrefix(bucket, prefix, maxFiles);
+  if (!listed.length) {
+    throw new Error(`No log objects found for gs://${cloudRef.bucket}/${prefix}`);
+  }
+
+  const filesWithContent = await Promise.all(
+    listed.map(async (item) => {
+      const tail = await readGcsObjectTail(bucket.file(item.key), maxBytesPerFile);
+      const filePath = `gs://${cloudRef.bucket}/${item.key}`;
+      return {
+        path: filePath,
+        content: tail.content,
+        totalBytes: tail.totalBytes,
+        truncated: tail.truncated,
+      };
+    })
+  );
+
+  return buildPayloadFromFileChunks(cloudRef.rawPath, "directory", filesWithContent);
+}
+
+async function createAzureBlobServiceClient(cloudConfig, requestedAccount) {
+  const { BlobServiceClient, StorageSharedKeyCredential } = await importAzureBlobSdk();
+
+  if (cloudConfig.azureConnectionString) {
+    return BlobServiceClient.fromConnectionString(cloudConfig.azureConnectionString);
+  }
+
+  const account = requestedAccount || cloudConfig.azureDefaultAccount;
+  if (!account) {
+    throw new Error(
+      "Azure account is missing. Use az://<account>/<container>/<path> or set AZURE_STORAGE_ACCOUNT."
+    );
+  }
+
+  if (cloudConfig.azureAccountKey) {
+    const credential = new StorageSharedKeyCredential(account, cloudConfig.azureAccountKey);
+    return new BlobServiceClient(`https://${account}.blob.core.windows.net`, credential);
+  }
+
+  const sasToken = normalizeSasToken(cloudConfig.azureSasToken);
+  if (sasToken) {
+    return new BlobServiceClient(`https://${account}.blob.core.windows.net?${sasToken}`);
+  }
+
+  throw new Error(
+    "Azure credentials missing. Set AZURE_STORAGE_CONNECTION_STRING or AZURE_STORAGE_ACCOUNT + AZURE_STORAGE_KEY."
+  );
+}
+
+async function readAzureBlobTail(blobClient, maxBytesPerFile) {
+  const properties = await blobClient.getProperties();
+  const totalBytes = Number(properties?.contentLength || 0);
+  if (!totalBytes) {
+    return {
+      content: "",
+      totalBytes: 0,
+      truncated: false,
+    };
+  }
+
+  const bytesToRead = Math.min(totalBytes, Math.max(1, maxBytesPerFile));
+  const offset = Math.max(0, totalBytes - bytesToRead);
+  const response = await blobClient.download(offset, bytesToRead);
+  const buffer = await streamLikeToBuffer(response?.readableStreamBody);
+  return buildTailContent(buffer, totalBytes, maxBytesPerFile);
+}
+
+async function listAzureBlobsByPrefix(containerClient, prefix, maxFiles) {
+  const scanCap = Math.max(maxFiles * 12, 120);
+  const results = [];
+
+  for await (const blob of containerClient.listBlobsFlat({ prefix: prefix || undefined })) {
+    results.push({
+      key: blob.name,
+      size: Number(blob.properties?.contentLength || 0),
+      modifiedAt: blob.properties?.lastModified || 0,
+    });
+    if (results.length >= scanCap) break;
+  }
+
+  return selectRecentCloudObjects(results, maxFiles);
+}
+
+async function buildAzurePayload(cloudRef, { cloudConfig, maxFiles, maxBytesPerFile }) {
+  const key = cloudRef.objectPath || "";
+  const explicitPrefix = !key || key.endsWith("/");
+
+  if (cloudRef.isHttpsUrl && !explicitPrefix) {
+    const { BlobClient } = await importAzureBlobSdk();
+    const blobClient = new BlobClient(cloudRef.rawPath);
+    const tail = await readAzureBlobTail(blobClient, maxBytesPerFile);
+    return {
+      path: cloudRef.rawPath,
+      mode: "file",
+      files: [cloudRef.rawPath],
+      content: tail.content,
+      meta: [
+        {
+          path: cloudRef.rawPath,
+          totalBytes: tail.totalBytes,
+          truncated: tail.truncated,
+        },
+      ],
+    };
+  }
+
+  const serviceClient = await createAzureBlobServiceClient(cloudConfig, cloudRef.account);
+  const containerClient = serviceClient.getContainerClient(cloudRef.container);
+
+  if (!explicitPrefix) {
+    const blobClient = containerClient.getBlobClient(key);
+    try {
+      const tail = await readAzureBlobTail(blobClient, maxBytesPerFile);
+      const objectPath = `az://${cloudRef.account || cloudConfig.azureDefaultAccount}/${cloudRef.container}/${key}`;
+      return {
+        path: cloudRef.rawPath,
+        mode: "file",
+        files: [objectPath],
+        content: tail.content,
+        meta: [
+          {
+            path: objectPath,
+            totalBytes: tail.totalBytes,
+            truncated: tail.truncated,
+          },
+        ],
+      };
+    } catch (error) {
+      if (!isObjectNotFoundError(error)) throw error;
+    }
+  }
+
+  const prefix = explicitPrefix ? key : key;
+  const listed = await listAzureBlobsByPrefix(containerClient, prefix, maxFiles);
+  if (!listed.length) {
+    throw new Error(
+      `No log blobs found for az://${cloudRef.account || cloudConfig.azureDefaultAccount}/${cloudRef.container}/${prefix}`
+    );
+  }
+
+  const accountName = cloudRef.account || cloudConfig.azureDefaultAccount;
+  const filesWithContent = await Promise.all(
+    listed.map(async (item) => {
+      const blobClient = containerClient.getBlobClient(item.key);
+      const tail = await readAzureBlobTail(blobClient, maxBytesPerFile);
+      const filePath = `az://${accountName}/${cloudRef.container}/${item.key}`;
+      return {
+        path: filePath,
+        content: tail.content,
+        totalBytes: tail.totalBytes,
+        truncated: tail.truncated,
+      };
+    })
+  );
+
+  return buildPayloadFromFileChunks(cloudRef.rawPath, "directory", filesWithContent);
+}
+
+async function buildCloudLogPayload(inputPath, { cloudConfig, maxFiles, maxBytesPerFile }) {
+  const cloudRef = parseCloudPath(inputPath);
+  if (!cloudRef) {
+    throw new Error("Invalid cloud path.");
+  }
+
+  if (!cloudConfig.enabled) {
+    throw new Error("Cloud path reading is disabled. Set LOG_ENABLE_CLOUD_PATHS=true.");
+  }
+
+  if (!cloudConfig.allowedProviders.includes(cloudRef.provider)) {
+    throw new Error(
+      `Cloud provider "${cloudRef.provider}" is not allowed. Update LOG_CLOUD_PROVIDERS to enable it.`
+    );
+  }
+
+  if (cloudRef.provider === "aws") {
+    return buildS3Payload(cloudRef, { cloudConfig, maxFiles, maxBytesPerFile });
+  }
+  if (cloudRef.provider === "gcp") {
+    return buildGcsPayload(cloudRef, { cloudConfig, maxFiles, maxBytesPerFile });
+  }
+  if (cloudRef.provider === "azure") {
+    return buildAzurePayload(cloudRef, { cloudConfig, maxFiles, maxBytesPerFile });
+  }
+
+  throw new Error(`Unsupported cloud provider: ${cloudRef.provider}`);
+}
+
 async function readDirectoryLogs(directoryPath, maxFiles) {
   const entries = await readdir(directoryPath, { withFileTypes: true });
   const candidateFiles = entries.filter((entry) => entry.isFile() && isLogLikeFile(entry.name));
@@ -486,7 +1068,7 @@ async function buildLogPayload(resolvedPath, maxFiles, maxBytesPerFile) {
   throw new Error("Path must be a file or directory.");
 }
 
-function createLogsApiHandler({ allowedRoots, allowAnyPath, maxFiles, maxBytesPerFile }) {
+function createLogsApiHandler({ allowedRoots, allowAnyPath, maxFiles, maxBytesPerFile, cloudConfig }) {
   return async function logsApiHandler(req, res, next) {
     if (req.method !== "GET") {
       res.statusCode = 405;
@@ -505,22 +1087,34 @@ function createLogsApiHandler({ allowedRoots, allowAnyPath, maxFiles, maxBytesPe
       return;
     }
 
-    const resolvedPath = path.resolve(inputPath);
-    const allowed = allowAnyPath || allowedRoots.some((root) => isWithinRoot(resolvedPath, root));
-
-    if (!allowed) {
-      res.statusCode = 403;
-      res.setHeader("Content-Type", "application/json");
-      res.end(
-        JSON.stringify({
-          error: "Path not allowed. Add parent directory to LOG_ALLOWED_ROOTS or set LOG_ALLOW_ANY_PATH=true.",
-        })
-      );
-      return;
-    }
-
     try {
-      const payload = await buildLogPayload(resolvedPath, maxFiles, maxBytesPerFile);
+      let payload;
+      const cloudRef = parseCloudPath(inputPath);
+
+      if (cloudRef) {
+        payload = await buildCloudLogPayload(inputPath, {
+          cloudConfig,
+          maxFiles,
+          maxBytesPerFile,
+        });
+      } else {
+        const resolvedPath = path.resolve(inputPath);
+        const allowed = allowAnyPath || allowedRoots.some((root) => isWithinRoot(resolvedPath, root));
+
+        if (!allowed) {
+          res.statusCode = 403;
+          res.setHeader("Content-Type", "application/json");
+          res.end(
+            JSON.stringify({
+              error:
+                "Path not allowed. Add parent directory to LOG_ALLOWED_ROOTS or set LOG_ALLOW_ANY_PATH=true.",
+            })
+          );
+          return;
+        }
+
+        payload = await buildLogPayload(resolvedPath, maxFiles, maxBytesPerFile);
+      }
 
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
@@ -533,7 +1127,7 @@ function createLogsApiHandler({ allowedRoots, allowAnyPath, maxFiles, maxBytesPe
   };
 }
 
-function createRawLogsApiHandler({ allowedRoots, allowAnyPath, maxFiles, maxBytesPerFile }) {
+function createRawLogsApiHandler({ allowedRoots, allowAnyPath, maxFiles, maxBytesPerFile, cloudConfig }) {
   return async function rawLogsApiHandler(req, res) {
     if (req.method !== "GET") {
       res.statusCode = 405;
@@ -552,17 +1146,28 @@ function createRawLogsApiHandler({ allowedRoots, allowAnyPath, maxFiles, maxByte
       return;
     }
 
-    const resolvedPath = path.resolve(inputPath);
-    const allowed = allowAnyPath || allowedRoots.some((root) => isWithinRoot(resolvedPath, root));
-    if (!allowed) {
-      res.statusCode = 403;
-      res.setHeader("Content-Type", "text/plain; charset=utf-8");
-      res.end("Path not allowed.");
-      return;
-    }
-
     try {
-      const payload = await buildLogPayload(resolvedPath, maxFiles, maxBytesPerFile);
+      let payload;
+      const cloudRef = parseCloudPath(inputPath);
+
+      if (cloudRef) {
+        payload = await buildCloudLogPayload(inputPath, {
+          cloudConfig,
+          maxFiles,
+          maxBytesPerFile,
+        });
+      } else {
+        const resolvedPath = path.resolve(inputPath);
+        const allowed = allowAnyPath || allowedRoots.some((root) => isWithinRoot(resolvedPath, root));
+        if (!allowed) {
+          res.statusCode = 403;
+          res.setHeader("Content-Type", "text/plain; charset=utf-8");
+          res.end("Path not allowed.");
+          return;
+        }
+
+        payload = await buildLogPayload(resolvedPath, maxFiles, maxBytesPerFile);
+      }
       res.statusCode = 200;
       res.setHeader("Content-Type", "text/plain; charset=utf-8");
       res.end(payload.content);
@@ -664,7 +1269,8 @@ function createWebSolutionsApiHandler({ maxSolutions, openAiApiKey, chatgptModel
 
       if (solutions.length < limit) {
         try {
-          const stackOverflowSolutions = await searchStackOverflowSolutions(query, limit);
+          const remaining = Math.max(limit - solutions.length, 1);
+          const stackOverflowSolutions = await searchStackOverflowSolutions(query, remaining);
           solutions = mergeUniqueSolutions(solutions, stackOverflowSolutions, limit);
         } catch (error) {
           warnings.push(error instanceof Error ? error.message : "Stack Overflow search failed.");
@@ -673,9 +1279,8 @@ function createWebSolutionsApiHandler({ maxSolutions, openAiApiKey, chatgptModel
 
       if (!solutions.length) {
         warnings.push("No web matches found for this issue. Showing local fallback guidance.");
+        solutions = buildFallbackSolutions(finding).slice(0, limit);
       }
-
-      solutions = mergeUniqueSolutions(solutions, buildFallbackSolutions(finding), limit);
       const warning = warnings.filter(Boolean).join(" ");
 
       res.statusCode = 200;
@@ -694,6 +1299,17 @@ export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
   const allowedRoots = parseAllowedRoots(env.LOG_ALLOWED_ROOTS);
   const allowAnyPath = env.LOG_ALLOW_ANY_PATH === "true";
+  const cloudConfig = {
+    enabled: env.LOG_ENABLE_CLOUD_PATHS !== "false",
+    allowedProviders: parseCloudProviders(env.LOG_CLOUD_PROVIDERS),
+    awsRegion: String(env.LOG_AWS_REGION || env.AWS_REGION || env.AWS_DEFAULT_REGION || "us-east-1").trim(),
+    gcpProjectId: String(env.GCP_PROJECT_ID || env.GOOGLE_CLOUD_PROJECT || "").trim(),
+    gcpCredentialsJson: String(env.GOOGLE_APPLICATION_CREDENTIALS_JSON || "").trim(),
+    azureConnectionString: String(env.AZURE_STORAGE_CONNECTION_STRING || "").trim(),
+    azureDefaultAccount: String(env.AZURE_STORAGE_ACCOUNT || env.AZURE_STORAGE_ACCOUNT_NAME || "").trim(),
+    azureAccountKey: String(env.AZURE_STORAGE_KEY || env.AZURE_STORAGE_ACCOUNT_KEY || "").trim(),
+    azureSasToken: String(env.AZURE_STORAGE_SAS_TOKEN || "").trim(),
+  };
   const maxFilesFromEnv = Number.parseInt(env.LOG_MAX_FILES || "", 10);
   const maxFiles = Number.isNaN(maxFilesFromEnv) ? 30 : Math.min(Math.max(maxFilesFromEnv, 1), 30);
   const maxBytesFromEnv = Number.parseInt(env.LOG_MAX_BYTES || "", 10);
@@ -712,12 +1328,14 @@ export default defineConfig(({ mode }) => {
     allowAnyPath,
     maxFiles,
     maxBytesPerFile,
+    cloudConfig,
   });
   const rawLogsApiHandler = createRawLogsApiHandler({
     allowedRoots,
     allowAnyPath,
     maxFiles,
     maxBytesPerFile,
+    cloudConfig,
   });
   const pathHistoryApiHandler = createPathHistoryApiHandler({
     configFilePath,

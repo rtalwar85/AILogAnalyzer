@@ -62,12 +62,60 @@ LOG_ALLOWED_ROOTS=//server/share/logs;//another/share/logs
 # If true, allows any filesystem path
 LOG_ALLOW_ANY_PATH=true
 
+# Enable cloud object storage path reading
+LOG_ENABLE_CLOUD_PATHS=true
+
+# Allowed providers: aws,gcp,azure
+LOG_CLOUD_PROVIDERS=aws,gcp,azure
+
+# AWS S3
+LOG_AWS_REGION=us-east-1
+
+# GCP Cloud Storage
+GCP_PROJECT_ID=
+GOOGLE_APPLICATION_CREDENTIALS_JSON=
+
+# Azure Blob
+AZURE_STORAGE_CONNECTION_STRING=
+AZURE_STORAGE_ACCOUNT=
+AZURE_STORAGE_KEY=
+AZURE_STORAGE_SAS_TOKEN=
+
 # Limits
 LOG_MAX_FILES=30
 LOG_MAX_BYTES=2097152
 LOG_PATH_HISTORY_LIMIT=30
 LOG_WEB_SOLUTION_LIMIT=5
 ```
+
+4. Install optional cloud provider SDKs (required for S3/GCS/Azure paths):
+
+```bash
+npm install @aws-sdk/client-s3 @google-cloud/storage @azure/storage-blob
+```
+
+## Supported Path Formats
+
+- Local Windows file/folder: `C:\logs\app.log`, `\\server\share\logs\`
+- Local Unix file/folder: `/var/log/app.log`, `/opt/logs/`
+- AWS S3 object/prefix: `s3://my-bucket/app/SystemOut.log`, `s3://my-bucket/app/logs/`
+- GCP GCS object/prefix: `gs://my-bucket/app/SystemOut.log`, `gs://my-bucket/app/logs/`
+- Azure Blob object/prefix:
+  - `az://<account>/<container>/path/to/log.log`
+  - `az://<account>/<container>/path/to/logs/`
+  - `https://<account>.blob.core.windows.net/<container>/path/to/log.log?<sas-token>`
+
+## Cloud Auth Notes
+
+- AWS:
+  - Uses standard AWS SDK credential chain (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, IAM role, etc.).
+  - Region comes from `LOG_AWS_REGION` (or `AWS_REGION`).
+- GCP:
+  - Uses default application credentials.
+  - You can pass inline service account JSON using `GOOGLE_APPLICATION_CREDENTIALS_JSON`.
+- Azure:
+  - Priority: `AZURE_STORAGE_CONNECTION_STRING`, then `AZURE_STORAGE_ACCOUNT` + `AZURE_STORAGE_KEY`, then `AZURE_STORAGE_SAS_TOKEN`.
+  - For `az://<container>/...` format, set `AZURE_STORAGE_ACCOUNT`.
 
 ## Run
 
