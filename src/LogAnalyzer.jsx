@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "./log-analyzer.css";
 
 const MAX_FILES = 30;
@@ -7,6 +7,7 @@ const PATH_HISTORY_LIMIT = 30;
 const WEB_SOLUTION_LIMIT = 5;
 const STORAGE_KEYS = {
   excluded: "log_analyzer_excluded_fingerprints",
+  excludedRecords: "log_analyzer_excluded_records",
   reviews: "log_analyzer_review_records",
   learned: "log_analyzer_learned_scenarios",
   history: "log_analyzer_feedback_history",
@@ -120,9 +121,24 @@ function displayCompactPath(sourcePath) {
   return `${prefix}...${fileName}`;
 }
 
-function buildLogViewUrl(sourcePath) {
+function isLikelyFileSystemPath(sourcePath) {
+  const normalized = normalizePathInput(sourcePath);
+  if (!normalized) return false;
+  if (normalized.startsWith("\\\\")) return true;
+  if (normalized.startsWith("/")) return true;
+  if (/^[A-Za-z]:[\\/]/.test(normalized)) return true;
+  return /[\\/]/.test(normalized);
+}
+
+function buildLogViewUrl(sourcePath, uploadedFileLinks = {}) {
   const normalized = normalizePathInput(sourcePath);
   if (!normalized || normalized === "manual-input") return "";
+  if (uploadedFileLinks[normalized]) {
+    return uploadedFileLinks[normalized];
+  }
+  if (!isLikelyFileSystemPath(normalized)) {
+    return "";
+  }
   return `/api/logs/raw?path=${encodeURIComponent(normalized)}`;
 }
 
@@ -613,8 +629,14 @@ export default function LogAnalyzer() {
   const [autoRead, setAutoRead] = useState(false);
   const [pollSeconds, setPollSeconds] = useState("30");
   const [lastReadAt, setLastReadAt] = useState("");
+  const [clearExclusionTargets, setClearExclusionTargets] = useState([]);
+  const [showExclusionManager, setShowExclusionManager] = useState(false);
+  const [isExclusionDropdownOpen, setIsExclusionDropdownOpen] = useState(false);
   const [excludedFingerprints, setExcludedFingerprints] = useState(
     () => new Set(safeReadStorage(STORAGE_KEYS.excluded, []))
+  );
+  const [excludedRecords, setExcludedRecords] = useState(() =>
+    safeReadStorage(STORAGE_KEYS.excludedRecords, {})
   );
   const [reviewRecords, setReviewRecords] = useState(() =>
     safeReadStorage(STORAGE_KEYS.reviews, {})
@@ -628,6 +650,8 @@ export default function LogAnalyzer() {
   const [pathHistory, setPathHistory] = useState(() =>
     safeReadStorage(STORAGE_KEYS.pathHistory, [])
   );
+  const [uploadedFileLinks, setUploadedFileLinks] = useState({});
+  const exclusionDropdownRef = useRef(null);
 
   const hasConfig = useMemo(
     () =>
@@ -669,6 +693,45 @@ export default function LogAnalyzer() {
     return [...map.entries()].map(([sourcePath, count]) => ({ sourcePath, count }));
   }, [searchResults]);
 
+  const exclusionList = useMemo(
+    () =>
+      [...excludedFingerprints]
+        .map((fingerprint) => {
+          const record = excludedRecords[fingerprint] || {};
+          const review = reviewRecords[fingerprint] || {};
+          return {
+            fingerprint,
+            title: record.title || review.title || "Excluded finding",
+            sourceName: record.sourceName || "",
+            updatedAt: record.updatedAt || review.updatedAt || "",
+          };
+        })
+        .sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || "")),
+    [excludedFingerprints, excludedRecords, reviewRecords]
+  );
+
+  const selectedClearAll = useMemo(
+    () => clearExclusionTargets.includes("__all__"),
+    [clearExclusionTargets]
+  );
+
+  const selectedExclusions = useMemo(() => {
+    if (!clearExclusionTargets.length || selectedClearAll) return [];
+    const selected = new Set(clearExclusionTargets);
+    return exclusionList.filter((item) => selected.has(item.fingerprint));
+  }, [clearExclusionTargets, exclusionList, selectedClearAll]);
+
+  const clearExclusionSummaryLabel = useMemo(() => {
+    if (!exclusionList.length) return "No exclusions available";
+    if (selectedClearAll) return `All exclusions (${exclusionList.length}) selected`;
+    if (!clearExclusionTargets.length) return "Select exclusions...";
+    if (selectedExclusions.length === 1) {
+      const item = selectedExclusions[0];
+      return item?.sourceName ? `${item.title} [${item.sourceName}]` : item?.title || "1 selected";
+    }
+    return `${selectedExclusions.length} exclusions selected`;
+  }, [clearExclusionTargets.length, exclusionList, selectedClearAll, selectedExclusions]);
+
   const analyzeLogs = useCallback(
     async (rawLogs, includeAi) => {
       const entries = parseLogEntries(rawLogs);
@@ -697,6 +760,10 @@ export default function LogAnalyzer() {
   }, [excludedFingerprints]);
 
   useEffect(() => {
+    safeWriteStorage(STORAGE_KEYS.excludedRecords, excludedRecords);
+  }, [excludedRecords]);
+
+  useEffect(() => {
     safeWriteStorage(STORAGE_KEYS.reviews, reviewRecords);
   }, [reviewRecords]);
 
@@ -712,6 +779,52 @@ export default function LogAnalyzer() {
     safeWriteStorage(STORAGE_KEYS.pathHistory, pathHistory);
     void savePathHistoryToConfig(pathHistory, { replace: true });
   }, [pathHistory]);
+
+  useEffect(() => {
+    if (!clearExclusionTargets.length) return;
+    setClearExclusionTargets((prev) =>
+      prev.filter((item) => item === "__all__" || excludedFingerprints.has(item))
+    );
+  }, [clearExclusionTargets, excludedFingerprints]);
+
+  useEffect(() => {
+    if (!showExclusionManager) {
+      setIsExclusionDropdownOpen(false);
+      return;
+    }
+
+    function onDocumentMouseDown(event) {
+      if (!exclusionDropdownRef.current) return;
+      if (!exclusionDropdownRef.current.contains(event.target)) {
+        setIsExclusionDropdownOpen(false);
+      }
+    }
+
+    function onDocumentKeyDown(event) {
+      if (event.key === "Escape") {
+        setIsExclusionDropdownOpen(false);
+      }
+    }
+
+    document.addEventListener("mousedown", onDocumentMouseDown);
+    document.addEventListener("keydown", onDocumentKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onDocumentMouseDown);
+      document.removeEventListener("keydown", onDocumentKeyDown);
+    };
+  }, [showExclusionManager]);
+
+  useEffect(() => {
+    return () => {
+      Object.values(uploadedFileLinks).forEach((url) => {
+        try {
+          URL.revokeObjectURL(url);
+        } catch {
+          // ignore cleanup errors
+        }
+      });
+    };
+  }, [uploadedFileLinks]);
 
   useEffect(() => {
     let cancelled = false;
@@ -759,6 +872,7 @@ export default function LogAnalyzer() {
           .map((item) => `--- PATH: ${item.path} ---\n${item.content}`)
           .join("\n\n");
 
+        setUploadedFileLinks({});
         setLogs(mergedLogs);
         setLastReadAt(new Date().toLocaleString());
         setError(failures ? `Read ${successes.length}/${parsedPaths.length} paths.` : "");
@@ -810,6 +924,45 @@ export default function LogAnalyzer() {
     setFeedbackHistory((prev) =>
       [{ ...payload, at: new Date().toISOString() }, ...prev].slice(0, 1000)
     );
+  }
+
+  function clearAllExclusions() {
+    setExcludedFingerprints(new Set());
+    setExcludedRecords({});
+    pushFeedbackHistory({ action: "clear_all_exclusions" });
+  }
+
+  function toggleClearExclusionTarget(value) {
+    const target = String(value || "").trim();
+    if (!target) return;
+
+    setClearExclusionTargets((prev) => {
+      const hasTarget = prev.includes(target);
+
+      if (target === "__all__") {
+        return hasTarget ? [] : ["__all__"];
+      }
+
+      const base = prev.filter((item) => item !== "__all__");
+      if (hasTarget) {
+        return base.filter((item) => item !== target);
+      }
+
+      return [...base, target];
+    });
+  }
+
+  function applyClearExclusionSelection() {
+    if (!clearExclusionTargets.length) return;
+    if (selectedClearAll) {
+      clearAllExclusions();
+      setClearExclusionTargets([]);
+      setIsExclusionDropdownOpen(false);
+      return;
+    }
+    removeExcludedFingerprints(clearExclusionTargets);
+    setClearExclusionTargets([]);
+    setIsExclusionDropdownOpen(false);
   }
 
   function addPathToInput(rawPath) {
@@ -934,7 +1087,49 @@ export default function LogAnalyzer() {
       next.add(fingerprint);
       return next;
     });
+    setExcludedRecords((prev) => ({
+      ...prev,
+      [fingerprint]: {
+        title: item.title,
+        sourceName: item.sourceName || "",
+        updatedAt: new Date().toISOString(),
+      },
+    }));
     pushFeedbackHistory({ action: "exclude_permanent", fingerprint, title: item.title });
+  }
+
+  function removeExcludedFingerprints(fingerprints) {
+    const unique = [...new Set((fingerprints || []).filter((item) => item && item !== "__all__"))];
+    if (!unique.length) return;
+
+    const removalEvents = unique.map((fingerprint) => ({
+      fingerprint,
+      title:
+        excludedRecords[fingerprint]?.title ||
+        reviewRecords[fingerprint]?.title ||
+        "Excluded finding",
+    }));
+
+    setExcludedFingerprints((prev) => {
+      const next = new Set(prev);
+      unique.forEach((fingerprint) => next.delete(fingerprint));
+      return next;
+    });
+    setExcludedRecords((prev) => {
+      const next = { ...prev };
+      unique.forEach((fingerprint) => {
+        delete next[fingerprint];
+      });
+      return next;
+    });
+
+    removalEvents.forEach((event) => {
+      pushFeedbackHistory({
+        action: "exclude_removed",
+        fingerprint: event.fingerprint,
+        title: event.title,
+      });
+    });
   }
 
   async function onAnalyze() {
@@ -972,10 +1167,15 @@ export default function LogAnalyzer() {
 
     const selected = files.slice(0, MAX_FILES);
     const contents = await Promise.all(selected.map((file) => readFileAsText(file)));
+    const nextLinks = {};
+    selected.forEach((file) => {
+      nextLinks[file.name] = URL.createObjectURL(file);
+    });
     const merged = selected
       .map((file, index) => `--- FILE: ${file.name} ---\n${contents[index]}`)
       .join("\n\n");
 
+    setUploadedFileLinks(nextLinks);
     setLogs(merged);
     setAutoRead(false);
   }
@@ -997,10 +1197,14 @@ export default function LogAnalyzer() {
             <span>Configured paths</span>
             <strong>{parsedPaths.length}</strong>
           </article>
-          <article className="stat-card">
+          <button
+            type="button"
+            className={`stat-card stat-card-button ${showExclusionManager ? "is-active" : ""}`}
+            onClick={() => setShowExclusionManager((prev) => !prev)}
+          >
             <span>Permanent exclusions</span>
             <strong>{excludedFingerprints.size}</strong>
-          </article>
+          </button>
         </div>
 
         <div className="filters top-filters">
@@ -1059,20 +1263,125 @@ export default function LogAnalyzer() {
 
         <div className="meta-row">
           <small>Source mode: {autoRead ? "continuous read" : "manual / upload"}</small>
-          <button
-            type="button"
-            className="action-button action-ghost"
-            onClick={() => setExcludedFingerprints(new Set())}
-          >
-            Clear exclusions
-          </button>
         </div>
+        {showExclusionManager ? (
+          <>
+            <div className="clear-exclusion-row">
+              <div className="filter-field clear-exclusion-picker">
+                <label>Clear exclusion</label>
+                <div className="multi-select-dropdown" ref={exclusionDropdownRef}>
+                  <button
+                    type="button"
+                    className={`multi-select-trigger ${isExclusionDropdownOpen ? "is-open" : ""}`}
+                    onClick={() => setIsExclusionDropdownOpen((prev) => !prev)}
+                    disabled={!exclusionList.length}
+                  >
+                    <span className="multi-select-trigger-text">{clearExclusionSummaryLabel}</span>
+                    {clearExclusionTargets.length ? (
+                      <span className="multi-select-count">
+                        {selectedClearAll ? "ALL" : clearExclusionTargets.length}
+                      </span>
+                    ) : null}
+                  </button>
+                  {isExclusionDropdownOpen ? (
+                    <div className="multi-select-menu">
+                      <div className="multi-select-menu-header">
+                        <button
+                          type="button"
+                          className="multi-select-mini"
+                          onClick={() => setClearExclusionTargets(["__all__"])}
+                          disabled={!exclusionList.length}
+                        >
+                          Select all
+                        </button>
+                        <button
+                          type="button"
+                          className="multi-select-mini"
+                          onClick={() => setClearExclusionTargets([])}
+                        >
+                          Clear
+                        </button>
+                      </div>
+                      <label className="multi-select-option">
+                        <input
+                          type="checkbox"
+                          checked={selectedClearAll}
+                          onChange={() => toggleClearExclusionTarget("__all__")}
+                          disabled={!exclusionList.length}
+                        />
+                        <span>All exclusions</span>
+                      </label>
+                      {exclusionList.length ? (
+                        exclusionList.map((item) => (
+                          <label key={item.fingerprint} className="multi-select-option">
+                            <input
+                              type="checkbox"
+                              checked={!selectedClearAll && clearExclusionTargets.includes(item.fingerprint)}
+                              onChange={() => toggleClearExclusionTarget(item.fingerprint)}
+                            />
+                            <span>{item.sourceName ? `${item.title} [${item.sourceName}]` : item.title}</span>
+                          </label>
+                        ))
+                      ) : (
+                        <p className="multi-select-empty">No exclusions available.</p>
+                      )}
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+              <div className="filter-field clear-exclusion-action">
+                <label htmlFor="clear-exclusion-apply" className="clear-exclusion-action-label">
+                  Action
+                </label>
+                <button
+                  id="clear-exclusion-apply"
+                  type="button"
+                  className="action-button action-ghost"
+                  onClick={applyClearExclusionSelection}
+                  disabled={!clearExclusionTargets.length}
+                >
+                  Apply
+                </button>
+              </div>
+            </div>
+            {clearExclusionTargets.length ? (
+              <section className="excluded-panel">
+                {selectedClearAll ? (
+                  <p className="muted">
+                    All exclusions selected ({exclusionList.length}). Click <strong>Apply</strong> to clear all.
+                  </p>
+                ) : selectedExclusions.length ? (
+                  <div className="excluded-list">
+                    {selectedExclusions.map((item) => (
+                      <article key={item.fingerprint} className="excluded-item">
+                        <div className="excluded-item-body">
+                          <p className="excluded-item-title">{item.title}</p>
+                          <code title={item.fingerprint}>{item.fingerprint}</code>
+                          {item.sourceName ? <small className="muted">Source: {item.sourceName}</small> : null}
+                          {item.updatedAt ? (
+                            <small className="muted">
+                              Excluded at: {new Date(item.updatedAt).toLocaleString()}
+                            </small>
+                          ) : null}
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="muted">No matching exclusions selected.</p>
+                )}
+              </section>
+            ) : null}
+          </>
+        ) : null}
 
         <label htmlFor="path-list">Continuous read paths (up to 30, one per line)</label>
         <textarea
           id="path-list"
           className="path-input"
-          placeholder={"C:\\logs\\app.log\nC:\\logs\\worker.log"}
+          placeholder={
+            "C:\\logs\\app.log\n/var/log/app.log\ns3://my-bucket/app/SystemOut.log\ngs://my-bucket/app/logs/\naz://myaccount/mycontainer/path/"
+          }
           value={pathListInput}
           onChange={(event) => setPathListInput(event.target.value)}
         />
@@ -1150,7 +1459,7 @@ export default function LogAnalyzer() {
         </div>
         <small>
           Continuous read requires `VITE_LOG_WATCH_ENDPOINT` (default `/api/logs`) and supports
-          `?path=...`.
+          `?path=...` for local, `s3://`, `gs://`, and `az://` paths.
         </small>
 
         <label htmlFor="log-file">Upload logs (up to 30 files)</label>
@@ -1167,7 +1476,10 @@ export default function LogAnalyzer() {
           id="log-input"
           placeholder="Paste logs here..."
           value={logs}
-          onChange={(event) => setLogs(event.target.value)}
+          onChange={(event) => {
+            setUploadedFileLinks({});
+            setLogs(event.target.value);
+          }}
         />
 
         <div className="actions">
@@ -1239,10 +1551,10 @@ export default function LogAnalyzer() {
                     <code title={displaySourcePath(result.sourcePath)}>
                       {displayCompactPath(result.sourcePath)}:{result.lineNumber}
                     </code>
-                    {buildLogViewUrl(result.sourcePath) ? (
+                    {buildLogViewUrl(result.sourcePath, uploadedFileLinks) ? (
                       <a
                         className="log-link"
-                        href={buildLogViewUrl(result.sourcePath)}
+                        href={buildLogViewUrl(result.sourcePath, uploadedFileLinks)}
                         target="_blank"
                         rel="noreferrer"
                       >
@@ -1282,10 +1594,10 @@ export default function LogAnalyzer() {
                 <code title={displaySourcePath(item.sourcePath)}>
                   {displayCompactPath(item.sourcePath)}
                 </code>
-                {buildLogViewUrl(item.sourcePath) ? (
+                {buildLogViewUrl(item.sourcePath, uploadedFileLinks) ? (
                   <a
                     className="log-link"
-                    href={buildLogViewUrl(item.sourcePath)}
+                    href={buildLogViewUrl(item.sourcePath, uploadedFileLinks)}
                     target="_blank"
                     rel="noreferrer"
                   >
