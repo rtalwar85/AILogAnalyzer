@@ -15,7 +15,7 @@ Spring Boot 2.7 / Java 11 implementation of AILogAnalyzer.
   - `GET /api/path-history`
   - `POST /api/path-history`
 - Web solution lookup with free-first routing:
-  - `local -> Gemini free tier -> Groq free tier -> OpenRouter free model -> Stack Overflow -> GitHub Issues -> optional ChatGPT paid fallback`
+  - `local -> Google links/CSE -> Gemini free tier -> Groq free tier -> OpenRouter free model -> Stack Overflow -> GitHub Issues -> optional ChatGPT paid fallback`
   - `POST /api/web-solutions`
 - Frontend static files served from `src/main/resources/static`
 
@@ -71,6 +71,8 @@ java -jar target/ailoganalyzer-java11-1.0.0.jar
   - optional `AZURE_STORAGE_SAS_TOKEN`
 
 - Web solutions:
+  - `LOG_ENABLE_GOOGLE_SEARCH` (default `true`)
+  - `GOOGLE_CSE_API_KEY` + `GOOGLE_CSE_CX` (optional; if set, app fetches direct Google Custom Search result links)
   - `GEMINI_API_KEY` (optional; enables Gemini free-tier source)
   - `GROQ_API_KEY` (optional; enables Groq free-tier source)
   - `OPENROUTER_API_KEY` (optional; enables OpenRouter free model source)
@@ -90,4 +92,4 @@ java -jar target/ailoganalyzer-java11-1.0.0.jar
 ## Notes
 
 - For unrestricted local paths, set `LOG_ALLOW_ANY_PATH=true`.
-- Without ChatGPT, the app still returns Stack Overflow and GitHub issue guidance.
+- Without ChatGPT, the app still returns Google links, Stack Overflow, and GitHub issue guidance.

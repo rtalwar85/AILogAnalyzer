@@ -28,11 +28,12 @@ import org.springframework.stereotype.Service;
 @Service
 public class WebSolutionsService {
   private static final String OPENAI_RESPONSES_API_URL = "https://api.openai.com/v1/responses";
+  private static final String GOOGLE_CSE_API_URL = "https://www.googleapis.com/customsearch/v1";
   private static final String GROQ_CHAT_COMPLETIONS_API_URL = "https://api.groq.com/openai/v1/chat/completions";
   private static final String OPENROUTER_CHAT_COMPLETIONS_API_URL =
       "https://openrouter.ai/api/v1/chat/completions";
   private static final List<String> ALL_WEB_SOURCE_KEYS =
-      List.of("local", "gemini", "groq", "openrouter", "stackoverflow", "github", "chatgpt");
+      List.of("local", "google", "gemini", "groq", "openrouter", "stackoverflow", "github", "chatgpt");
   private static final Pattern EXCEPTION_CLASS_PATTERN =
       Pattern.compile(
           "\\b([A-Za-z_$][A-Za-z0-9_$]*(?:\\.[A-Za-z_$][A-Za-z0-9_$]*)*(?:Exception|Error|Throwable))\\b");
@@ -86,6 +87,18 @@ public class WebSolutionsService {
           if (solutions.isEmpty()) {
             List<WebSolutionItem> fallback = buildFallbackSolutions(finding);
             solutions = mergeUniqueSolutions(solutions, fallback, limit);
+          }
+          break;
+
+        case "google":
+          if (!settings.isEnableGoogleSearch()) {
+            break;
+          }
+          try {
+            List<WebSolutionItem> googleSolutions = searchGoogleSolutions(query, remaining);
+            solutions = mergeUniqueSolutions(solutions, googleSolutions, limit);
+          } catch (Exception exception) {
+            warnings.add(exception.getMessage() == null ? "Google search failed." : exception.getMessage());
           }
           break;
 
@@ -200,6 +213,9 @@ public class WebSolutionsService {
 
     if (normalized.isEmpty()) {
       normalized.add("local");
+      if (settings.isEnableGoogleSearch()) {
+        normalized.add("google");
+      }
       if (settings.isEnableGeminiFreeSearch() && hasText(settings.getGeminiApiKey())) {
         normalized.add("gemini");
       }
@@ -238,7 +254,11 @@ public class WebSolutionsService {
     if ("local".equals(value) || "fallback".equals(value)) {
       return "local";
     }
-    if ("gemini".equals(value) || "google-gemini".equals(value) || "google".equals(value)) {
+    if ("google".equals(value) || "google-search".equals(value) || "google-links".equals(value)
+        || "search".equals(value)) {
+      return "google";
+    }
+    if ("gemini".equals(value) || "google-gemini".equals(value)) {
       return "gemini";
     }
     if ("groq".equals(value) || "groq-free".equals(value) || "groqfree".equals(value)) {
@@ -260,6 +280,86 @@ public class WebSolutionsService {
       return "chatgpt";
     }
     return "";
+  }
+
+  private List<WebSolutionItem> searchGoogleSolutions(String query, int maxSolutions)
+      throws IOException, InterruptedException {
+    List<WebSolutionItem> fromCse = searchGoogleCustomSearch(query, maxSolutions);
+    if (!fromCse.isEmpty()) {
+      return fromCse;
+    }
+    return buildGoogleSearchLinks(query, maxSolutions);
+  }
+
+  private List<WebSolutionItem> searchGoogleCustomSearch(String query, int maxSolutions)
+      throws IOException, InterruptedException {
+    if (!hasText(settings.getGoogleApiKey()) || !hasText(settings.getGoogleCseCx())) {
+      return List.of();
+    }
+
+    int pageSize = Math.min(Math.max(maxSolutions, 1), 10);
+    String searchUrl =
+        GOOGLE_CSE_API_URL
+            + "?key="
+            + urlEncode(settings.getGoogleApiKey())
+            + "&cx="
+            + urlEncode(settings.getGoogleCseCx())
+            + "&q="
+            + urlEncode(query)
+            + "&num="
+            + pageSize;
+
+    JsonNode searchJson = httpGetJson(searchUrl);
+    JsonNode items = searchJson.path("items");
+    if (!items.isArray() || items.size() == 0) {
+      return List.of();
+    }
+
+    List<WebSolutionItem> output = new ArrayList<>();
+    for (JsonNode item : items) {
+      String title = item.path("title").asText("Google result");
+      String link = item.path("link").asText("");
+      String snippet = item.path("snippet").asText("");
+      String solution =
+          hasText(snippet)
+              ? snippet
+              : "Open the linked result and validate whether the fix matches your stack trace.";
+      output.add(new WebSolutionItem(title, "Google Search", solution, hasText(link) ? link : ""));
+      if (output.size() >= maxSolutions) {
+        break;
+      }
+    }
+    return output;
+  }
+
+  private List<WebSolutionItem> buildGoogleSearchLinks(String query, int maxSolutions) {
+    List<String> queryVariants = new ArrayList<>();
+    queryVariants.add(query);
+    queryVariants.add(query + " site:stackoverflow.com");
+    queryVariants.add(query + " site:github.com");
+    queryVariants.add(query + " \"fix\"");
+    queryVariants.add(query + " \"root cause\"");
+
+    List<WebSolutionItem> output = new ArrayList<>();
+    Set<String> seen = new LinkedHashSet<>();
+    for (String variant : queryVariants) {
+      String normalized = safe(variant).trim();
+      if (!hasText(normalized)) {
+        continue;
+      }
+      String key = normalized.toLowerCase(Locale.ROOT);
+      if (!seen.add(key)) {
+        continue;
+      }
+      String url = "https://www.google.com/search?q=" + urlEncode(normalized);
+      String title = "Google: " + truncate(normalized, 96);
+      String solution = "Open this Google query and review top matching fixes and issue discussions.";
+      output.add(new WebSolutionItem(title, "Google Search", solution, url));
+      if (output.size() >= maxSolutions) {
+        break;
+      }
+    }
+    return output;
   }
 
   private List<WebSolutionItem> searchWithChatgptWeb(

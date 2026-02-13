@@ -7,6 +7,7 @@ const PATH_HISTORY_LIMIT = 30;
 const WEB_SOLUTION_LIMIT = 5;
 const WEB_SOURCE_OPTIONS = [
   { id: "local", label: "Local Analyzer" },
+  { id: "google", label: "Google Links" },
   { id: "gemini", label: "Gemini (Free Tier)" },
   { id: "groq", label: "Groq (Free Tier)" },
   { id: "openrouter", label: "OpenRouter Free" },

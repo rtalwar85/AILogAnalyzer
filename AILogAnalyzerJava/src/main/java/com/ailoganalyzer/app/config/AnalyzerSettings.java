@@ -41,11 +41,14 @@ public class AnalyzerSettings {
   private final String azureAccountKey;
   private final String azureSasToken;
   private final int webSolutionLimit;
+  private final boolean enableGoogleSearch;
   private final boolean enableGeminiFreeSearch;
   private final boolean enableGroqFreeSearch;
   private final boolean enableOpenRouterFreeSearch;
   private final boolean enableChatgptWebSearch;
   private final boolean enableGithubIssueSearch;
+  private final String googleApiKey;
+  private final String googleCseCx;
   private final String geminiApiKey;
   private final String groqApiKey;
   private final String openRouterApiKey;
@@ -106,12 +109,15 @@ public class AnalyzerSettings {
 
     this.webSolutionLimit =
         clamp(readInt(readFirst("LOG_WEB_SOLUTION_LIMIT"), DEFAULT_WEB_SOLUTION_LIMIT), 1, 10);
+    this.enableGoogleSearch = !"false".equalsIgnoreCase(readFirst("LOG_ENABLE_GOOGLE_SEARCH"));
     this.enableGeminiFreeSearch = !"false".equalsIgnoreCase(readFirst("LOG_ENABLE_GEMINI_FREE_SEARCH"));
     this.enableGroqFreeSearch = !"false".equalsIgnoreCase(readFirst("LOG_ENABLE_GROQ_FREE_SEARCH"));
     this.enableOpenRouterFreeSearch =
         !"false".equalsIgnoreCase(readFirst("LOG_ENABLE_OPENROUTER_FREE_SEARCH"));
     this.enableChatgptWebSearch = "true".equalsIgnoreCase(readFirst("LOG_ENABLE_CHATGPT_WEB_SEARCH"));
     this.enableGithubIssueSearch = !"false".equalsIgnoreCase(readFirst("LOG_ENABLE_GITHUB_ISSUE_SEARCH"));
+    this.googleApiKey = firstNonBlank(readFirst("GOOGLE_CSE_API_KEY"), readFirst("GOOGLE_API_KEY"), "");
+    this.googleCseCx = firstNonBlank(readFirst("GOOGLE_CSE_CX"), readFirst("GOOGLE_SEARCH_ENGINE_ID"), "");
     this.geminiApiKey = readFirst("GEMINI_API_KEY");
     this.groqApiKey = readFirst("GROQ_API_KEY");
     this.openRouterApiKey = readFirst("OPENROUTER_API_KEY");
@@ -367,6 +373,10 @@ public class AnalyzerSettings {
     return openAiApiKey;
   }
 
+  public boolean isEnableGoogleSearch() {
+    return enableGoogleSearch;
+  }
+
   public boolean isEnableGeminiFreeSearch() {
     return enableGeminiFreeSearch;
   }
@@ -389,6 +399,14 @@ public class AnalyzerSettings {
 
   public String getGithubToken() {
     return githubToken;
+  }
+
+  public String getGoogleApiKey() {
+    return googleApiKey;
+  }
+
+  public String getGoogleCseCx() {
+    return googleCseCx;
   }
 
   public String getGeminiApiKey() {
