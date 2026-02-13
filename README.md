@@ -2,6 +2,25 @@
 
 AI-powered log analyzer for reading multiple log files, detecting exception patterns, and suggesting resolutions (including web-backed solutions).
 
+## Java 11 Version (Recommended)
+
+This repository now includes a Java 11 Spring Boot implementation in `AILogAnalyzerJava`.
+
+Run it with:
+
+```bash
+cd AILogAnalyzerJava
+mvn spring-boot:run
+```
+
+Then open:
+
+- `http://localhost:8080`
+
+Detailed Java setup is in `AILogAnalyzerJava/README.md`.
+
+## Node/Vite Version (Legacy)
+
 ## Features
 
 - Read and analyze up to 30 log files.
