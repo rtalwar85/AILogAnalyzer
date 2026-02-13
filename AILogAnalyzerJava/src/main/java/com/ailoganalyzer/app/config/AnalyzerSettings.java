@@ -21,6 +21,9 @@ public class AnalyzerSettings {
   public static final int DEFAULT_PATH_HISTORY_LIMIT = 30;
   public static final int DEFAULT_WEB_SOLUTION_LIMIT = 5;
   public static final String DEFAULT_CHATGPT_WEB_SEARCH_MODEL = "gpt-4.1-mini";
+  public static final String DEFAULT_GEMINI_FREE_MODEL = "gemini-2.0-flash-lite";
+  public static final String DEFAULT_GROQ_FREE_MODEL = "llama-3.1-8b-instant";
+  public static final String DEFAULT_OPENROUTER_FREE_MODEL = "meta-llama/llama-3.2-3b-instruct:free";
 
   private final List<Path> allowedRoots;
   private final boolean allowAnyPath;
@@ -38,7 +41,19 @@ public class AnalyzerSettings {
   private final String azureAccountKey;
   private final String azureSasToken;
   private final int webSolutionLimit;
+  private final boolean enableGeminiFreeSearch;
+  private final boolean enableGroqFreeSearch;
+  private final boolean enableOpenRouterFreeSearch;
+  private final boolean enableChatgptWebSearch;
+  private final boolean enableGithubIssueSearch;
+  private final String geminiApiKey;
+  private final String groqApiKey;
+  private final String openRouterApiKey;
   private final String openAiApiKey;
+  private final String githubToken;
+  private final String geminiFreeModel;
+  private final String groqFreeModel;
+  private final String openRouterFreeModel;
   private final String chatgptWebSearchModel;
   private final Environment environment;
   private final Map<String, String> dotEnvValues;
@@ -91,8 +106,23 @@ public class AnalyzerSettings {
 
     this.webSolutionLimit =
         clamp(readInt(readFirst("LOG_WEB_SOLUTION_LIMIT"), DEFAULT_WEB_SOLUTION_LIMIT), 1, 10);
+    this.enableGeminiFreeSearch = !"false".equalsIgnoreCase(readFirst("LOG_ENABLE_GEMINI_FREE_SEARCH"));
+    this.enableGroqFreeSearch = !"false".equalsIgnoreCase(readFirst("LOG_ENABLE_GROQ_FREE_SEARCH"));
+    this.enableOpenRouterFreeSearch =
+        !"false".equalsIgnoreCase(readFirst("LOG_ENABLE_OPENROUTER_FREE_SEARCH"));
+    this.enableChatgptWebSearch = "true".equalsIgnoreCase(readFirst("LOG_ENABLE_CHATGPT_WEB_SEARCH"));
+    this.enableGithubIssueSearch = !"false".equalsIgnoreCase(readFirst("LOG_ENABLE_GITHUB_ISSUE_SEARCH"));
+    this.geminiApiKey = readFirst("GEMINI_API_KEY");
+    this.groqApiKey = readFirst("GROQ_API_KEY");
+    this.openRouterApiKey = readFirst("OPENROUTER_API_KEY");
     this.openAiApiKey =
         firstNonBlank(readFirst("OPENAI_API_KEY"), readFirst("VITE_OPENAI_API_KEY"), "");
+    this.githubToken = readFirst("GITHUB_TOKEN");
+    this.geminiFreeModel =
+        firstNonBlank(readFirst("LOG_GEMINI_FREE_MODEL"), DEFAULT_GEMINI_FREE_MODEL);
+    this.groqFreeModel = firstNonBlank(readFirst("LOG_GROQ_FREE_MODEL"), DEFAULT_GROQ_FREE_MODEL);
+    this.openRouterFreeModel =
+        firstNonBlank(readFirst("LOG_OPENROUTER_FREE_MODEL"), DEFAULT_OPENROUTER_FREE_MODEL);
     this.chatgptWebSearchModel =
         firstNonBlank(
             readFirst("LOG_CHATGPT_WEB_SEARCH_MODEL"), DEFAULT_CHATGPT_WEB_SEARCH_MODEL);
@@ -335,6 +365,54 @@ public class AnalyzerSettings {
 
   public String getOpenAiApiKey() {
     return openAiApiKey;
+  }
+
+  public boolean isEnableGeminiFreeSearch() {
+    return enableGeminiFreeSearch;
+  }
+
+  public boolean isEnableGroqFreeSearch() {
+    return enableGroqFreeSearch;
+  }
+
+  public boolean isEnableOpenRouterFreeSearch() {
+    return enableOpenRouterFreeSearch;
+  }
+
+  public boolean isEnableChatgptWebSearch() {
+    return enableChatgptWebSearch;
+  }
+
+  public boolean isEnableGithubIssueSearch() {
+    return enableGithubIssueSearch;
+  }
+
+  public String getGithubToken() {
+    return githubToken;
+  }
+
+  public String getGeminiApiKey() {
+    return geminiApiKey;
+  }
+
+  public String getGroqApiKey() {
+    return groqApiKey;
+  }
+
+  public String getOpenRouterApiKey() {
+    return openRouterApiKey;
+  }
+
+  public String getGeminiFreeModel() {
+    return geminiFreeModel;
+  }
+
+  public String getGroqFreeModel() {
+    return groqFreeModel;
+  }
+
+  public String getOpenRouterFreeModel() {
+    return openRouterFreeModel;
   }
 
   public String getChatgptWebSearchModel() {

@@ -87,7 +87,8 @@ public class ApiController {
       Map<String, Object> payload = body == null ? Collections.emptyMap() : body;
       Map<String, Object> finding = toObjectMap(payload.get("finding"));
       Integer limit = toInteger(payload.get("limit"));
-      WebSolutionResponse response = webSolutionsService.findSolutions(finding, limit);
+      List<String> sourcePriority = toStringList(payload.get("sourcePriority"));
+      WebSolutionResponse response = webSolutionsService.findSolutions(finding, limit, sourcePriority);
       return ResponseEntity.ok(response);
     } catch (IllegalArgumentException ex) {
       return badRequest(ex.getMessage());

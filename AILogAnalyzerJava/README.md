@@ -14,7 +14,8 @@ Spring Boot 2.7 / Java 11 implementation of AILogAnalyzer.
 - Saved path history config (last 30 by default):
   - `GET /api/path-history`
   - `POST /api/path-history`
-- Web solution lookup (ChatGPT web search -> Stack Overflow -> local fallback):
+- Web solution lookup with free-first routing:
+  - `local -> Gemini free tier -> Groq free tier -> OpenRouter free model -> Stack Overflow -> GitHub Issues -> optional ChatGPT paid fallback`
   - `POST /api/web-solutions`
 - Frontend static files served from `src/main/resources/static`
 
@@ -70,11 +71,23 @@ java -jar target/ailoganalyzer-java11-1.0.0.jar
   - optional `AZURE_STORAGE_SAS_TOKEN`
 
 - Web solutions:
-  - `OPENAI_API_KEY`
+  - `GEMINI_API_KEY` (optional; enables Gemini free-tier source)
+  - `GROQ_API_KEY` (optional; enables Groq free-tier source)
+  - `OPENROUTER_API_KEY` (optional; enables OpenRouter free model source)
+  - `LOG_ENABLE_GEMINI_FREE_SEARCH` (default `true`)
+  - `LOG_ENABLE_GROQ_FREE_SEARCH` (default `true`)
+  - `LOG_ENABLE_OPENROUTER_FREE_SEARCH` (default `true`)
+  - `LOG_GEMINI_FREE_MODEL` (default `gemini-2.0-flash-lite`)
+  - `LOG_GROQ_FREE_MODEL` (default `llama-3.1-8b-instant`)
+  - `LOG_OPENROUTER_FREE_MODEL` (default `meta-llama/llama-3.2-3b-instruct:free`)
+  - `LOG_ENABLE_CHATGPT_WEB_SEARCH` (default `false`)
+  - `LOG_ENABLE_GITHUB_ISSUE_SEARCH` (default `true`)
+  - `GITHUB_TOKEN` (optional, raises GitHub API limits)
+  - `OPENAI_API_KEY` (required only when ChatGPT search is enabled)
   - `LOG_CHATGPT_WEB_SEARCH_MODEL` (default `gpt-4.1-mini`)
   - `LOG_WEB_SOLUTION_LIMIT` (max 10)
 
 ## Notes
 
 - For unrestricted local paths, set `LOG_ALLOW_ANY_PATH=true`.
-- If `OPENAI_API_KEY` is missing, the app still returns Stack Overflow results and local fallback guidance.
+- Without ChatGPT, the app still returns Stack Overflow and GitHub issue guidance.

@@ -5,6 +5,16 @@ const MAX_FILES = 30;
 const SEARCH_MAX_RESULTS = 500;
 const PATH_HISTORY_LIMIT = 30;
 const WEB_SOLUTION_LIMIT = 5;
+const WEB_SOURCE_OPTIONS = [
+  { id: "local", label: "Local Analyzer" },
+  { id: "gemini", label: "Gemini (Free Tier)" },
+  { id: "groq", label: "Groq (Free Tier)" },
+  { id: "openrouter", label: "OpenRouter Free" },
+  { id: "stackoverflow", label: "Stack Overflow" },
+  { id: "github", label: "GitHub Issues" },
+  { id: "chatgpt", label: "ChatGPT Web (Paid)" },
+];
+const DEFAULT_WEB_SOURCE_PRIORITY = WEB_SOURCE_OPTIONS.map((item) => item.id);
 const STORAGE_KEYS = {
   excluded: "log_analyzer_excluded_fingerprints",
   excludedRecords: "log_analyzer_excluded_records",
@@ -213,6 +223,29 @@ function mergePathHistory(existingPaths, incomingPaths, limit = PATH_HISTORY_LIM
   }
 
   return merged;
+}
+
+function normalizeWebSourcePriority(inputPriority) {
+  if (!Array.isArray(inputPriority)) {
+    return [...DEFAULT_WEB_SOURCE_PRIORITY];
+  }
+
+  const normalized = [];
+  for (const item of inputPriority) {
+    const value = String(item || "").trim().toLowerCase();
+    if (!value) continue;
+    if (!DEFAULT_WEB_SOURCE_PRIORITY.includes(value)) continue;
+    if (normalized.includes(value)) continue;
+    normalized.push(value);
+  }
+
+  for (const value of DEFAULT_WEB_SOURCE_PRIORITY) {
+    if (!normalized.includes(value)) {
+      normalized.push(value);
+    }
+  }
+
+  return normalized.slice(0, DEFAULT_WEB_SOURCE_PRIORITY.length);
 }
 
 async function loadPathHistoryFromConfig() {
@@ -651,6 +684,9 @@ export default function LogAnalyzer() {
     safeReadStorage(STORAGE_KEYS.pathHistory, [])
   );
   const [uploadedFileLinks, setUploadedFileLinks] = useState({});
+  const [webSourcePriority, setWebSourcePriority] = useState(() =>
+    normalizeWebSourcePriority(DEFAULT_WEB_SOURCE_PRIORITY)
+  );
   const exclusionDropdownRef = useRef(null);
 
   const hasConfig = useMemo(
@@ -692,6 +728,14 @@ export default function LogAnalyzer() {
     });
     return [...map.entries()].map(([sourcePath, count]) => ({ sourcePath, count }));
   }, [searchResults]);
+
+  const webSourceOrderLabel = useMemo(
+    () =>
+      normalizeWebSourcePriority(webSourcePriority)
+        .map((id) => WEB_SOURCE_OPTIONS.find((option) => option.id === id)?.label || id)
+        .join(" -> "),
+    [webSourcePriority]
+  );
 
   const exclusionList = useMemo(
     () =>
@@ -993,6 +1037,33 @@ export default function LogAnalyzer() {
     await savePathHistoryToConfig([], { replace: true });
   }
 
+  function updateWebSourcePriorityAt(position, sourceId) {
+    const nextSource = String(sourceId || "").trim().toLowerCase();
+    if (!DEFAULT_WEB_SOURCE_PRIORITY.includes(nextSource)) return;
+
+    setWebSourcePriority((prev) => {
+      const current = normalizeWebSourcePriority(prev);
+      const targetIndex = Math.max(0, Math.min(position, current.length - 1));
+      const existingIndex = current.indexOf(nextSource);
+
+      if (existingIndex === targetIndex) return current;
+
+      if (existingIndex >= 0) {
+        const swap = current[targetIndex];
+        current[targetIndex] = nextSource;
+        current[existingIndex] = swap;
+      } else {
+        current[targetIndex] = nextSource;
+      }
+
+      return normalizeWebSourcePriority(current);
+    });
+  }
+
+  function resetWebSourcePriority() {
+    setWebSourcePriority([...DEFAULT_WEB_SOURCE_PRIORITY]);
+  }
+
   async function findWebSolutionsForFinding(item) {
     const key = findingFingerprint(item);
     setWebSolutionBusyByFinding((prev) => ({ ...prev, [key]: true }));
@@ -1003,6 +1074,7 @@ export default function LogAnalyzer() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           limit: WEB_SOLUTION_LIMIT,
+          sourcePriority: normalizeWebSourcePriority(webSourcePriority),
           finding: {
             title: item.title,
             categoryLabel: item.categoryLabel,
@@ -1260,6 +1332,41 @@ export default function LogAnalyzer() {
             />
           </div>
         </div>
+
+        <section className="web-source-priority-panel">
+          <div className="web-source-priority-header">
+            <div>
+              <h3>Web Resolution Source Priority</h3>
+              <p className="muted">Applied live when you click "Find Web Solutions".</p>
+            </div>
+            <button
+              type="button"
+              className="action-button action-ghost"
+              onClick={resetWebSourcePriority}
+            >
+              Reset order
+            </button>
+          </div>
+          <div className="web-source-priority-grid">
+            {normalizeWebSourcePriority(webSourcePriority).map((sourceId, index) => (
+              <div key={`priority-${index}`} className="filter-field">
+                <label htmlFor={`source-priority-${index}`}>Priority {index + 1}</label>
+                <select
+                  id={`source-priority-${index}`}
+                  value={sourceId}
+                  onChange={(event) => updateWebSourcePriorityAt(index, event.target.value)}
+                >
+                  {WEB_SOURCE_OPTIONS.map((option) => (
+                    <option key={option.id} value={option.id}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ))}
+          </div>
+          <p className="muted source-priority-summary">Current order: {webSourceOrderLabel}</p>
+        </section>
 
         <div className="meta-row">
           <small>Source mode: {autoRead ? "continuous read" : "manual / upload"}</small>
