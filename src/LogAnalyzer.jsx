@@ -23,6 +23,7 @@ const STORAGE_KEYS = {
   learned: "log_analyzer_learned_scenarios",
   history: "log_analyzer_feedback_history",
   pathHistory: "log_analyzer_path_history",
+  searchPreferences: "log_analyzer_search_preferences",
 };
 
 const RULES = [
@@ -249,6 +250,37 @@ function normalizeWebSourcePriority(inputPriority) {
   return normalized.slice(0, DEFAULT_WEB_SOURCE_PRIORITY.length);
 }
 
+function normalizeBoolPreference(value, fallback = false) {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "true") return true;
+    if (normalized === "false") return false;
+  }
+  return fallback;
+}
+
+function normalizePollSecondsPreference(value) {
+  const parsed = Number.parseInt(String(value ?? "30"), 10);
+  if (Number.isNaN(parsed)) return "30";
+  return String(Math.min(Math.max(parsed, 1), 3600));
+}
+
+function normalizeSearchPreferences(input) {
+  const source = input && typeof input === "object" ? input : {};
+  return {
+    dateFrom: String(source.dateFrom || "").trim().slice(0, 16),
+    dateTo: String(source.dateTo || "").trim().slice(0, 16),
+    timeFrom: String(source.timeFrom || "").trim().slice(0, 16),
+    timeTo: String(source.timeTo || "").trim().slice(0, 16),
+    problemType: String(source.problemType || "all").trim() || "all",
+    searchCaseSensitive: normalizeBoolPreference(source.searchCaseSensitive, false),
+    autoRead: normalizeBoolPreference(source.autoRead, false),
+    pollSeconds: normalizePollSecondsPreference(source.pollSeconds),
+    webSourcePriority: normalizeWebSourcePriority(source.webSourcePriority),
+  };
+}
+
 async function loadPathHistoryFromConfig() {
   try {
     const response = await fetch("/api/path-history", { method: "GET" });
@@ -272,6 +304,33 @@ async function savePathHistoryToConfig(paths, options = {}) {
     return Array.isArray(json.paths) ? json.paths : [];
   } catch {
     return [];
+  }
+}
+
+async function loadSearchPreferencesFromConfig() {
+  try {
+    const response = await fetch("/api/preferences", { method: "GET" });
+    if (!response.ok) return null;
+    const json = await response.json();
+    if (!json || typeof json.preferences !== "object" || !json.preferences) return null;
+    return json.preferences;
+  } catch {
+    return null;
+  }
+}
+
+async function saveSearchPreferencesToConfig(preferences) {
+  try {
+    const response = await fetch("/api/preferences", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ preferences }),
+    });
+    if (!response.ok) return null;
+    const json = await response.json();
+    return json && typeof json.preferences === "object" ? json.preferences : null;
+  } catch {
+    return null;
   }
 }
 
@@ -644,6 +703,11 @@ function readFileAsText(file) {
 }
 
 export default function LogAnalyzer() {
+  const initialSearchPreferencesRef = useRef(
+    normalizeSearchPreferences(safeReadStorage(STORAGE_KEYS.searchPreferences, {}))
+  );
+  const initialSearchPreferences = initialSearchPreferencesRef.current;
+
   const [logs, setLogs] = useState("");
   const [findings, setFindings] = useState([]);
   const [aiResult, setAiResult] = useState(null);
@@ -651,17 +715,19 @@ export default function LogAnalyzer() {
   const [webSolutionBusyByFinding, setWebSolutionBusyByFinding] = useState({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [dateFrom, setDateFrom] = useState("");
-  const [dateTo, setDateTo] = useState("");
-  const [timeFrom, setTimeFrom] = useState("");
-  const [timeTo, setTimeTo] = useState("");
-  const [problemType, setProblemType] = useState("all");
+  const [dateFrom, setDateFrom] = useState(initialSearchPreferences.dateFrom);
+  const [dateTo, setDateTo] = useState(initialSearchPreferences.dateTo);
+  const [timeFrom, setTimeFrom] = useState(initialSearchPreferences.timeFrom);
+  const [timeTo, setTimeTo] = useState(initialSearchPreferences.timeTo);
+  const [problemType, setProblemType] = useState(initialSearchPreferences.problemType);
   const [pathSuggestionInput, setPathSuggestionInput] = useState("");
   const [searchText, setSearchText] = useState("");
-  const [searchCaseSensitive, setSearchCaseSensitive] = useState(false);
+  const [searchCaseSensitive, setSearchCaseSensitive] = useState(
+    initialSearchPreferences.searchCaseSensitive
+  );
   const [pathListInput, setPathListInput] = useState("");
-  const [autoRead, setAutoRead] = useState(false);
-  const [pollSeconds, setPollSeconds] = useState("30");
+  const [autoRead, setAutoRead] = useState(initialSearchPreferences.autoRead);
+  const [pollSeconds, setPollSeconds] = useState(initialSearchPreferences.pollSeconds);
   const [lastReadAt, setLastReadAt] = useState("");
   const [clearExclusionTargets, setClearExclusionTargets] = useState([]);
   const [showExclusionManager, setShowExclusionManager] = useState(false);
@@ -686,8 +752,9 @@ export default function LogAnalyzer() {
   );
   const [uploadedFileLinks, setUploadedFileLinks] = useState({});
   const [webSourcePriority, setWebSourcePriority] = useState(() =>
-    normalizeWebSourcePriority(DEFAULT_WEB_SOURCE_PRIORITY)
+    normalizeWebSourcePriority(initialSearchPreferences.webSourcePriority)
   );
+  const [preferencesReady, setPreferencesReady] = useState(false);
   const exclusionDropdownRef = useRef(null);
 
   const hasConfig = useMemo(
@@ -826,6 +893,34 @@ export default function LogAnalyzer() {
   }, [pathHistory]);
 
   useEffect(() => {
+    const preferences = normalizeSearchPreferences({
+      dateFrom,
+      dateTo,
+      timeFrom,
+      timeTo,
+      problemType,
+      searchCaseSensitive,
+      autoRead,
+      pollSeconds,
+      webSourcePriority,
+    });
+    safeWriteStorage(STORAGE_KEYS.searchPreferences, preferences);
+    if (!preferencesReady) return;
+    void saveSearchPreferencesToConfig(preferences);
+  }, [
+    preferencesReady,
+    dateFrom,
+    dateTo,
+    timeFrom,
+    timeTo,
+    problemType,
+    searchCaseSensitive,
+    autoRead,
+    pollSeconds,
+    webSourcePriority,
+  ]);
+
+  useEffect(() => {
     if (!clearExclusionTargets.length) return;
     setClearExclusionTargets((prev) =>
       prev.filter((item) => item === "__all__" || excludedFingerprints.has(item))
@@ -876,6 +971,34 @@ export default function LogAnalyzer() {
     void loadPathHistoryFromConfig().then((paths) => {
       if (cancelled || !paths.length) return;
       setPathHistory((prev) => mergePathHistory(prev, paths));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadSearchPreferencesFromConfig().then((preferences) => {
+      if (cancelled) return;
+      const hasRemote =
+        preferences && typeof preferences === "object" && Object.keys(preferences).length > 0;
+      if (hasRemote) {
+        const merged = normalizeSearchPreferences({
+          ...initialSearchPreferencesRef.current,
+          ...preferences,
+        });
+        setDateFrom(merged.dateFrom);
+        setDateTo(merged.dateTo);
+        setTimeFrom(merged.timeFrom);
+        setTimeTo(merged.timeTo);
+        setProblemType(merged.problemType);
+        setSearchCaseSensitive(merged.searchCaseSensitive);
+        setAutoRead(merged.autoRead);
+        setPollSeconds(merged.pollSeconds);
+        setWebSourcePriority(merged.webSourcePriority);
+      }
+      setPreferencesReady(true);
     });
     return () => {
       cancelled = true;
@@ -1367,6 +1490,9 @@ export default function LogAnalyzer() {
             ))}
           </div>
           <p className="muted source-priority-summary">Current order: {webSourceOrderLabel}</p>
+          <p className="muted source-priority-summary">
+            Search preferences are saved automatically and restored on next launch.
+          </p>
         </section>
 
         <div className="meta-row">

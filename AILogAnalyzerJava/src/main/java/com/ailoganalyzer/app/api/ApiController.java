@@ -81,6 +81,27 @@ public class ApiController {
     }
   }
 
+  @GetMapping("/preferences")
+  public ResponseEntity<Map<String, Object>> getPreferences() {
+    Map<String, Object> preferences = pathHistoryService.readSearchPreferences();
+    return ResponseEntity.ok(Map.of("preferences", preferences));
+  }
+
+  @PostMapping("/preferences")
+  public ResponseEntity<?> savePreferences(@RequestBody(required = false) Map<String, Object> body) {
+    try {
+      Map<String, Object> payload = body == null ? Collections.emptyMap() : body;
+      Map<String, Object> preferences = toObjectMap(payload.get("preferences"));
+      if (preferences.isEmpty()) {
+        preferences = new LinkedHashMap<>(payload);
+      }
+      Map<String, Object> saved = pathHistoryService.writeSearchPreferences(preferences);
+      return ResponseEntity.ok(Map.of("preferences", saved));
+    } catch (Exception ex) {
+      return badRequest(ex.getMessage());
+    }
+  }
+
   @PostMapping("/web-solutions")
   public ResponseEntity<?> webSolutions(@RequestBody(required = false) Map<String, Object> body) {
     try {
