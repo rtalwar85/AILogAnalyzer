@@ -14,6 +14,9 @@ Spring Boot 2.7 / Java 11 implementation of AILogAnalyzer.
 - Saved path history config (last 30 by default):
   - `GET /api/path-history`
   - `POST /api/path-history`
+- Saved search preferences config:
+  - `GET /api/preferences`
+  - `POST /api/preferences`
 - Web solution lookup with free-first routing:
   - `local -> Google links/CSE -> Gemini free tier -> Groq free tier -> OpenRouter free model -> Stack Overflow -> GitHub Issues -> optional ChatGPT paid fallback`
   - `POST /api/web-solutions`
