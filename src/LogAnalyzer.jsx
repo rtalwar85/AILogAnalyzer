@@ -6,7 +6,7 @@ const SEARCH_MAX_RESULTS = 500;
 const PATH_HISTORY_LIMIT = 30;
 const WEB_SOLUTION_LIMIT = 5;
 const WEB_SOURCE_OPTIONS = [
-  { id: "local", label: "Local Analyzer" },
+  { id: "localai", label: "Local AI Engine" },
   { id: "google", label: "Google Links" },
   { id: "gemini", label: "Gemini (Free Tier)" },
   { id: "groq", label: "Groq (Free Tier)" },
@@ -14,6 +14,7 @@ const WEB_SOURCE_OPTIONS = [
   { id: "stackoverflow", label: "Stack Overflow" },
   { id: "github", label: "GitHub Issues" },
   { id: "chatgpt", label: "ChatGPT Web (Paid)" },
+  { id: "local", label: "Local Fallback" },
 ];
 const DEFAULT_WEB_SOURCE_PRIORITY = WEB_SOURCE_OPTIONS.map((item) => item.id);
 const STORAGE_KEYS = {
@@ -754,6 +755,7 @@ export default function LogAnalyzer() {
   const [webSourcePriority, setWebSourcePriority] = useState(() =>
     normalizeWebSourcePriority(initialSearchPreferences.webSourcePriority)
   );
+  const [showWebSourcePriority, setShowWebSourcePriority] = useState(false);
   const [preferencesReady, setPreferencesReady] = useState(false);
   const exclusionDropdownRef = useRef(null);
 
@@ -1463,36 +1465,54 @@ export default function LogAnalyzer() {
               <h3>Web Resolution Source Priority</h3>
               <p className="muted">Applied live when you click "Find Web Solutions".</p>
             </div>
-            <button
-              type="button"
-              className="action-button action-ghost"
-              onClick={resetWebSourcePriority}
-            >
-              Reset order
-            </button>
+            <div className="web-source-priority-actions">
+              <button
+                type="button"
+                className="action-button action-ghost"
+                onClick={() => setShowWebSourcePriority((prev) => !prev)}
+                aria-expanded={showWebSourcePriority}
+              >
+                {showWebSourcePriority ? "Hide" : "Show"}
+              </button>
+              <button
+                type="button"
+                className="action-button action-ghost"
+                onClick={resetWebSourcePriority}
+              >
+                Reset order
+              </button>
+            </div>
           </div>
-          <div className="web-source-priority-grid">
-            {normalizeWebSourcePriority(webSourcePriority).map((sourceId, index) => (
-              <div key={`priority-${index}`} className="filter-field">
-                <label htmlFor={`source-priority-${index}`}>Priority {index + 1}</label>
-                <select
-                  id={`source-priority-${index}`}
-                  value={sourceId}
-                  onChange={(event) => updateWebSourcePriorityAt(index, event.target.value)}
-                >
-                  {WEB_SOURCE_OPTIONS.map((option) => (
-                    <option key={option.id} value={option.id}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
+          {showWebSourcePriority ? (
+            <>
+              <div className="web-source-priority-grid">
+                {normalizeWebSourcePriority(webSourcePriority).map((sourceId, index) => (
+                  <div key={`priority-${index}`} className="filter-field">
+                    <label htmlFor={`source-priority-${index}`}>Priority {index + 1}</label>
+                    <select
+                      id={`source-priority-${index}`}
+                      value={sourceId}
+                      onChange={(event) => updateWebSourcePriorityAt(index, event.target.value)}
+                    >
+                      {WEB_SOURCE_OPTIONS.map((option) => (
+                        <option key={option.id} value={option.id}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
-          <p className="muted source-priority-summary">Current order: {webSourceOrderLabel}</p>
-          <p className="muted source-priority-summary">
-            Search preferences are saved automatically and restored on next launch.
-          </p>
+              <p className="muted source-priority-summary">Current order: {webSourceOrderLabel}</p>
+              <p className="muted source-priority-summary">
+                Search preferences are saved automatically and restored on next launch.
+              </p>
+            </>
+          ) : (
+            <p className="muted source-priority-summary">
+              Priority panel hidden. Click "Show" to view or change source order.
+            </p>
+          )}
         </section>
 
         <div className="meta-row">

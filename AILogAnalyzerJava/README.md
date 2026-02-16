@@ -18,7 +18,7 @@ Spring Boot 2.7 / Java 11 implementation of AILogAnalyzer.
   - `GET /api/preferences`
   - `POST /api/preferences`
 - Web solution lookup with free-first routing:
-  - `local -> Google links/CSE -> Gemini free tier -> Groq free tier -> OpenRouter free model -> Stack Overflow -> GitHub Issues -> optional ChatGPT paid fallback`
+  - `Local AI Engine (offline) -> Google links/CSE -> Gemini free tier -> Groq free tier -> OpenRouter free model -> Stack Overflow -> GitHub Issues -> optional ChatGPT paid fallback -> local fallback`
   - `POST /api/web-solutions`
 - Frontend static files served from `src/main/resources/static`
 

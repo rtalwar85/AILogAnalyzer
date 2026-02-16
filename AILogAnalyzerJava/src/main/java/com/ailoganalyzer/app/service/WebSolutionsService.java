@@ -33,7 +33,7 @@ public class WebSolutionsService {
   private static final String OPENROUTER_CHAT_COMPLETIONS_API_URL =
       "https://openrouter.ai/api/v1/chat/completions";
   private static final List<String> ALL_WEB_SOURCE_KEYS =
-      List.of("local", "google", "gemini", "groq", "openrouter", "stackoverflow", "github", "chatgpt");
+      List.of("localai", "google", "gemini", "groq", "openrouter", "stackoverflow", "github", "chatgpt", "local");
   private static final Pattern EXCEPTION_CLASS_PATTERN =
       Pattern.compile(
           "\\b([A-Za-z_$][A-Za-z0-9_$]*(?:\\.[A-Za-z_$][A-Za-z0-9_$]*)*(?:Exception|Error|Throwable))\\b");
@@ -83,6 +83,15 @@ public class WebSolutionsService {
 
       int remaining = Math.max(1, limit - solutions.size());
       switch (source) {
+        case "localai":
+          try {
+            List<WebSolutionItem> localAi = buildLocalAiSolutions(query, finding, remaining);
+            solutions = mergeUniqueSolutions(solutions, localAi, limit);
+          } catch (Exception exception) {
+            warnings.add(exception.getMessage() == null ? "Local AI analyzer failed." : exception.getMessage());
+          }
+          break;
+
         case "local":
           if (solutions.isEmpty()) {
             List<WebSolutionItem> fallback = buildFallbackSolutions(finding);
@@ -212,7 +221,7 @@ public class WebSolutionsService {
     }
 
     if (normalized.isEmpty()) {
-      normalized.add("local");
+      normalized.add("localai");
       if (settings.isEnableGoogleSearch()) {
         normalized.add("google");
       }
@@ -232,6 +241,7 @@ public class WebSolutionsService {
       if (settings.isEnableChatgptWebSearch()) {
         normalized.add("chatgpt");
       }
+      normalized.add("local");
       return normalized;
     }
 
@@ -250,6 +260,10 @@ public class WebSolutionsService {
     String value = safe(raw).trim().toLowerCase(Locale.ROOT);
     if (!hasText(value)) {
       return "";
+    }
+    if ("localai".equals(value) || "local-ai".equals(value) || "offline-ai".equals(value)
+        || "codex".equals(value) || "localengine".equals(value) || "engine".equals(value)) {
+      return "localai";
     }
     if ("local".equals(value) || "fallback".equals(value)) {
       return "local";
@@ -280,6 +294,156 @@ public class WebSolutionsService {
       return "chatgpt";
     }
     return "";
+  }
+
+  private List<WebSolutionItem> buildLocalAiSolutions(
+      String query, Map<String, Object> finding, int maxSolutions) {
+    String context =
+        compactText(
+            query
+                + " "
+                + safe(readValue(finding, "title"))
+                + " "
+                + safe(readValue(finding, "categoryLabel"))
+                + " "
+                + evidenceLines(finding).stream().limit(10).collect(Collectors.joining(" ")))
+            .toLowerCase(Locale.ROOT);
+
+    List<WebSolutionItem> output = new ArrayList<>();
+    output.add(
+        new WebSolutionItem(
+            "Pinpoint first failing frame",
+            "Local AI Engine",
+            "Locate the first exception stack frame in application code, capture request context, and identify the exact failing dependency call.",
+            ""));
+
+    if (containsAny(context, "nullpointerexception", "null pointer", "cannot invoke", "is null")) {
+      output.add(
+          new WebSolutionItem(
+              "Null-safety hardening",
+              "Local AI Engine",
+              "Add null guards at the failing object boundary, validate upstream payload fields, and add unit tests for null and empty variants.",
+              ""));
+    }
+
+    if (containsAny(context, "timeout", "timed out", "sockettimeout", "connect timed out")) {
+      output.add(
+          new WebSolutionItem(
+              "Timeout and dependency latency",
+              "Local AI Engine",
+              "Trace downstream latency for the same timestamp, tune client timeout/retry with exponential backoff, and verify connection pool saturation.",
+              ""));
+    }
+
+    if (containsAny(context, "connection refused", "econnrefused", "host unreachable", "no route to host")) {
+      output.add(
+          new WebSolutionItem(
+              "Connectivity and service availability",
+              "Local AI Engine",
+              "Confirm endpoint DNS/port reachability, service health, and firewall or security-group rules between caller and target service.",
+              ""));
+    }
+
+    if (containsAny(context, "sqlstate", "ora-", "sql", "database", "deadlock", "constraint")) {
+      output.add(
+          new WebSolutionItem(
+              "Database failure isolation",
+              "Local AI Engine",
+              "Capture exact SQL error code, validate connection pool and credentials, and inspect DB locks/indexes for the failed transaction window.",
+              ""));
+    }
+
+    if (containsAny(context, "unauthorized", "forbidden", "401", "403", "token", "jwt", "auth")) {
+      output.add(
+          new WebSolutionItem(
+              "Authentication and authorization checks",
+              "Local AI Engine",
+              "Verify token issuer/audience/expiry, check clock skew and key rotation, and confirm role-to-endpoint permission mapping.",
+              ""));
+    }
+
+    if (containsAny(context, "outofmemory", "java heap space", "metaspace", "gc overhead", "oom")) {
+      output.add(
+          new WebSolutionItem(
+              "Memory pressure remediation",
+              "Local AI Engine",
+              "Correlate heap growth with request pattern, cap in-memory batch size, and capture heap dump to identify retained objects.",
+              ""));
+    }
+
+    if (containsAny(context, "ssl", "certificate", "handshake", "pkix", "sun.security.validator")) {
+      output.add(
+          new WebSolutionItem(
+              "TLS certificate chain validation",
+              "Local AI Engine",
+              "Validate truststore/keystore chain, hostname SAN match, and certificate expiry/rotation for the target endpoint.",
+              ""));
+    }
+
+    if (containsAny(context, "classnotfoundexception", "noclassdeffounderror", "nosuchmethoderror")) {
+      output.add(
+          new WebSolutionItem(
+              "Dependency and classpath mismatch",
+              "Local AI Engine",
+              "Check runtime artifact versions against compile-time versions, inspect transitive dependency conflicts, and align deployment classpath.",
+              ""));
+    }
+
+    if (containsAny(context, "filenotfound", "no such file", "path not found", "access denied")) {
+      output.add(
+          new WebSolutionItem(
+              "File path and permission validation",
+              "Local AI Engine",
+              "Verify absolute file path, runtime user permissions, and mount/share availability for the host where the process runs.",
+              ""));
+    }
+
+    output.add(
+        new WebSolutionItem(
+            "Safe rollout and verification",
+            "Local AI Engine",
+            "Apply fix in lower environment, replay representative traffic, and monitor error rate plus latency during controlled production rollout.",
+            ""));
+
+    output.add(
+        new WebSolutionItem(
+            "Configuration and dependency drift check",
+            "Local AI Engine",
+            "Compare runtime configuration and dependency versions across working and failing environments to isolate drift introduced by deployment.",
+            ""));
+
+    output.add(
+        new WebSolutionItem(
+            "Observability and alert validation",
+            "Local AI Engine",
+            "Add structured logs and counters around the failing path, then verify alerts track both recovery and relapse after fix deployment.",
+            ""));
+
+    output.add(
+        new WebSolutionItem(
+            "Rollback and containment plan",
+            "Local AI Engine",
+            "Prepare immediate rollback or feature-flag containment if error rate does not improve, and document incident timeline with remediation steps.",
+            ""));
+
+    return mergeUniqueSolutions(List.of(), output, maxSolutions);
+  }
+
+  private boolean containsAny(String value, String... needles) {
+    String haystack = safe(value).toLowerCase(Locale.ROOT);
+    if (!hasText(haystack)) {
+      return false;
+    }
+    for (String needle : needles) {
+      String token = safe(needle).toLowerCase(Locale.ROOT);
+      if (!hasText(token)) {
+        continue;
+      }
+      if (haystack.contains(token)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private List<WebSolutionItem> searchGoogleSolutions(String query, int maxSolutions)

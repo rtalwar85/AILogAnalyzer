@@ -268,6 +268,12 @@
   margin: 0.2rem 0 0;
 }
 
+.web-source-priority-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
 .web-source-priority-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
@@ -539,6 +545,11 @@
   .web-source-priority-header {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .web-source-priority-actions {
+    width: 100%;
+    justify-content: flex-start;
   }
 
   .clear-exclusion-row {
