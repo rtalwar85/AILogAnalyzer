@@ -730,6 +730,7 @@ export default function LogAnalyzer() {
   const [autoRead, setAutoRead] = useState(initialSearchPreferences.autoRead);
   const [pollSeconds, setPollSeconds] = useState(initialSearchPreferences.pollSeconds);
   const [lastReadAt, setLastReadAt] = useState("");
+  const [isProblemTypeDropdownOpen, setIsProblemTypeDropdownOpen] = useState(false);
   const [clearExclusionTargets, setClearExclusionTargets] = useState([]);
   const [showExclusionManager, setShowExclusionManager] = useState(false);
   const [isExclusionDropdownOpen, setIsExclusionDropdownOpen] = useState(false);
@@ -757,6 +758,7 @@ export default function LogAnalyzer() {
   );
   const [showWebSourcePriority, setShowWebSourcePriority] = useState(false);
   const [preferencesReady, setPreferencesReady] = useState(false);
+  const problemTypeDropdownRef = useRef(null);
   const exclusionDropdownRef = useRef(null);
 
   const hasConfig = useMemo(
@@ -930,6 +932,30 @@ export default function LogAnalyzer() {
   }, [clearExclusionTargets, excludedFingerprints]);
 
   useEffect(() => {
+    if (!isProblemTypeDropdownOpen) return;
+
+    function onDocumentMouseDown(event) {
+      if (!problemTypeDropdownRef.current) return;
+      if (!problemTypeDropdownRef.current.contains(event.target)) {
+        setIsProblemTypeDropdownOpen(false);
+      }
+    }
+
+    function onDocumentKeyDown(event) {
+      if (event.key === "Escape") {
+        setIsProblemTypeDropdownOpen(false);
+      }
+    }
+
+    document.addEventListener("mousedown", onDocumentMouseDown);
+    document.addEventListener("keydown", onDocumentKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onDocumentMouseDown);
+      document.removeEventListener("keydown", onDocumentKeyDown);
+    };
+  }, [isProblemTypeDropdownOpen]);
+
+  useEffect(() => {
     if (!showExclusionManager) {
       setIsExclusionDropdownOpen(false);
       return;
@@ -1082,6 +1108,11 @@ export default function LogAnalyzer() {
     });
     return [...map.entries()].map(([id, title]) => ({ id, title }));
   }, [findings]);
+
+  const problemTypeLabel = useMemo(() => {
+    if (problemType === "all") return "All problems";
+    return problemTypeOptions.find((item) => item.id === problemType)?.title || "All problems";
+  }, [problemType, problemTypeOptions]);
 
   useEffect(() => {
     if (problemType === "all") return;
@@ -1408,18 +1439,48 @@ export default function LogAnalyzer() {
         <div className="filters top-filters">
           <div className="filter-field">
             <label htmlFor="problem-type">Problem type</label>
-            <select
-              id="problem-type"
-              value={problemType}
-              onChange={(event) => setProblemType(event.target.value)}
-            >
-              <option value="all">All problems</option>
-              {problemTypeOptions.map((item) => (
-                <option key={item.id} value={item.id}>
-                  {item.title}
-                </option>
-              ))}
-            </select>
+            <div className="single-select-dropdown" ref={problemTypeDropdownRef}>
+              <button
+                id="problem-type"
+                type="button"
+                className={`single-select-trigger ${isProblemTypeDropdownOpen ? "is-open" : ""}`}
+                onClick={() => setIsProblemTypeDropdownOpen((prev) => !prev)}
+                aria-expanded={isProblemTypeDropdownOpen}
+                aria-controls="problem-type-menu"
+              >
+                <span className="single-select-trigger-text">{problemTypeLabel}</span>
+              </button>
+              {isProblemTypeDropdownOpen ? (
+                <div id="problem-type-menu" className="single-select-menu" role="listbox">
+                  <button
+                    type="button"
+                    className={`single-select-option ${problemType === "all" ? "is-selected" : ""}`}
+                    onClick={() => {
+                      setProblemType("all");
+                      setIsProblemTypeDropdownOpen(false);
+                    }}
+                  >
+                    <span>All problems</span>
+                  </button>
+                  {problemTypeOptions.map((item) => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      className={`single-select-option ${
+                        problemType === item.id ? "is-selected" : ""
+                      }`}
+                      onClick={() => {
+                        setProblemType(item.id);
+                        setIsProblemTypeDropdownOpen(false);
+                      }}
+                      title={item.title}
+                    >
+                      <span>{item.title}</span>
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+            </div>
           </div>
           <div className="filter-field">
             <label htmlFor="date-from">Date from</label>
