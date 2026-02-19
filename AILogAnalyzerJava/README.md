@@ -18,7 +18,7 @@ Spring Boot 2.7 / Java 11 implementation of AILogAnalyzer.
   - `GET /api/preferences`
   - `POST /api/preferences`
 - Web solution lookup with free-first routing:
-  - `Local AI Engine (offline) -> Google links/CSE -> Gemini free tier -> Groq free tier -> OpenRouter free model -> Stack Overflow -> GitHub Issues -> optional ChatGPT paid fallback -> local fallback`
+  - `Local AI Engine (offline) -> Google links/CSE -> Gemini free tier -> Hugging Face -> Groq free tier -> OpenRouter free model -> Stack Overflow -> GitHub Issues -> optional ChatGPT paid fallback -> local fallback`
   - `POST /api/web-solutions`
 - Frontend static files served from `src/main/resources/static`
 
@@ -77,12 +77,15 @@ java -jar target/ailoganalyzer-java11-1.0.0.jar
   - `LOG_ENABLE_GOOGLE_SEARCH` (default `true`)
   - `GOOGLE_CSE_API_KEY` + `GOOGLE_CSE_CX` (optional; if set, app fetches direct Google Custom Search result links)
   - `GEMINI_API_KEY` (optional; enables Gemini free-tier source)
+  - `HUGGINGFACE_API_KEY` or `HF_TOKEN` (optional; enables Hugging Face source)
   - `GROQ_API_KEY` (optional; enables Groq free-tier source)
   - `OPENROUTER_API_KEY` (optional; enables OpenRouter free model source)
   - `LOG_ENABLE_GEMINI_FREE_SEARCH` (default `true`)
+  - `LOG_ENABLE_HUGGINGFACE_SEARCH` (default `true`)
   - `LOG_ENABLE_GROQ_FREE_SEARCH` (default `true`)
   - `LOG_ENABLE_OPENROUTER_FREE_SEARCH` (default `true`)
   - `LOG_GEMINI_FREE_MODEL` (default `gemini-2.0-flash-lite`)
+  - `LOG_HUGGINGFACE_MODEL` (default `Qwen/Qwen2.5-7B-Instruct`)
   - `LOG_GROQ_FREE_MODEL` (default `llama-3.1-8b-instant`)
   - `LOG_OPENROUTER_FREE_MODEL` (default `meta-llama/llama-3.2-3b-instruct:free`)
   - `LOG_ENABLE_CHATGPT_WEB_SEARCH` (default `false`)

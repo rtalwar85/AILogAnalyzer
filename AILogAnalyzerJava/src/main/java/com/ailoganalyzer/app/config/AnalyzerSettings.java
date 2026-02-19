@@ -22,6 +22,7 @@ public class AnalyzerSettings {
   public static final int DEFAULT_WEB_SOLUTION_LIMIT = 5;
   public static final String DEFAULT_CHATGPT_WEB_SEARCH_MODEL = "gpt-4.1-mini";
   public static final String DEFAULT_GEMINI_FREE_MODEL = "gemini-2.0-flash-lite";
+  public static final String DEFAULT_HUGGINGFACE_MODEL = "Qwen/Qwen2.5-7B-Instruct";
   public static final String DEFAULT_GROQ_FREE_MODEL = "llama-3.1-8b-instant";
   public static final String DEFAULT_OPENROUTER_FREE_MODEL = "meta-llama/llama-3.2-3b-instruct:free";
 
@@ -43,6 +44,7 @@ public class AnalyzerSettings {
   private final int webSolutionLimit;
   private final boolean enableGoogleSearch;
   private final boolean enableGeminiFreeSearch;
+  private final boolean enableHuggingFaceSearch;
   private final boolean enableGroqFreeSearch;
   private final boolean enableOpenRouterFreeSearch;
   private final boolean enableChatgptWebSearch;
@@ -50,11 +52,13 @@ public class AnalyzerSettings {
   private final String googleApiKey;
   private final String googleCseCx;
   private final String geminiApiKey;
+  private final String huggingFaceApiKey;
   private final String groqApiKey;
   private final String openRouterApiKey;
   private final String openAiApiKey;
   private final String githubToken;
   private final String geminiFreeModel;
+  private final String huggingFaceModel;
   private final String groqFreeModel;
   private final String openRouterFreeModel;
   private final String chatgptWebSearchModel;
@@ -111,6 +115,8 @@ public class AnalyzerSettings {
         clamp(readInt(readFirst("LOG_WEB_SOLUTION_LIMIT"), DEFAULT_WEB_SOLUTION_LIMIT), 1, 10);
     this.enableGoogleSearch = !"false".equalsIgnoreCase(readFirst("LOG_ENABLE_GOOGLE_SEARCH"));
     this.enableGeminiFreeSearch = !"false".equalsIgnoreCase(readFirst("LOG_ENABLE_GEMINI_FREE_SEARCH"));
+    this.enableHuggingFaceSearch =
+        !"false".equalsIgnoreCase(readFirst("LOG_ENABLE_HUGGINGFACE_SEARCH"));
     this.enableGroqFreeSearch = !"false".equalsIgnoreCase(readFirst("LOG_ENABLE_GROQ_FREE_SEARCH"));
     this.enableOpenRouterFreeSearch =
         !"false".equalsIgnoreCase(readFirst("LOG_ENABLE_OPENROUTER_FREE_SEARCH"));
@@ -119,6 +125,8 @@ public class AnalyzerSettings {
     this.googleApiKey = firstNonBlank(readFirst("GOOGLE_CSE_API_KEY"), readFirst("GOOGLE_API_KEY"), "");
     this.googleCseCx = firstNonBlank(readFirst("GOOGLE_CSE_CX"), readFirst("GOOGLE_SEARCH_ENGINE_ID"), "");
     this.geminiApiKey = readFirst("GEMINI_API_KEY");
+    this.huggingFaceApiKey =
+        firstNonBlank(readFirst("HUGGINGFACE_API_KEY"), readFirst("HF_TOKEN"), "");
     this.groqApiKey = readFirst("GROQ_API_KEY");
     this.openRouterApiKey = readFirst("OPENROUTER_API_KEY");
     this.openAiApiKey =
@@ -126,6 +134,8 @@ public class AnalyzerSettings {
     this.githubToken = readFirst("GITHUB_TOKEN");
     this.geminiFreeModel =
         firstNonBlank(readFirst("LOG_GEMINI_FREE_MODEL"), DEFAULT_GEMINI_FREE_MODEL);
+    this.huggingFaceModel =
+        firstNonBlank(readFirst("LOG_HUGGINGFACE_MODEL"), DEFAULT_HUGGINGFACE_MODEL);
     this.groqFreeModel = firstNonBlank(readFirst("LOG_GROQ_FREE_MODEL"), DEFAULT_GROQ_FREE_MODEL);
     this.openRouterFreeModel =
         firstNonBlank(readFirst("LOG_OPENROUTER_FREE_MODEL"), DEFAULT_OPENROUTER_FREE_MODEL);
@@ -381,6 +391,10 @@ public class AnalyzerSettings {
     return enableGeminiFreeSearch;
   }
 
+  public boolean isEnableHuggingFaceSearch() {
+    return enableHuggingFaceSearch;
+  }
+
   public boolean isEnableGroqFreeSearch() {
     return enableGroqFreeSearch;
   }
@@ -413,6 +427,10 @@ public class AnalyzerSettings {
     return geminiApiKey;
   }
 
+  public String getHuggingFaceApiKey() {
+    return huggingFaceApiKey;
+  }
+
   public String getGroqApiKey() {
     return groqApiKey;
   }
@@ -423,6 +441,10 @@ public class AnalyzerSettings {
 
   public String getGeminiFreeModel() {
     return geminiFreeModel;
+  }
+
+  public String getHuggingFaceModel() {
+    return huggingFaceModel;
   }
 
   public String getGroqFreeModel() {

@@ -9,6 +9,7 @@ const WEB_SOURCE_OPTIONS = [
   { id: "localai", label: "Local AI Engine" },
   { id: "google", label: "Google Links" },
   { id: "gemini", label: "Gemini (Free Tier)" },
+  { id: "huggingface", label: "Hugging Face" },
   { id: "groq", label: "Groq (Free Tier)" },
   { id: "openrouter", label: "OpenRouter Free" },
   { id: "stackoverflow", label: "Stack Overflow" },
@@ -24,6 +25,7 @@ const STORAGE_KEYS = {
   learned: "log_analyzer_learned_scenarios",
   history: "log_analyzer_feedback_history",
   pathHistory: "log_analyzer_path_history",
+  pathAliases: "log_analyzer_path_aliases",
   searchPreferences: "log_analyzer_search_preferences",
 };
 
@@ -112,6 +114,16 @@ function normalizePathInput(rawPath) {
     value = value.slice(1, -1).trim();
   }
   return value;
+}
+
+function isSamePathValue(left, right) {
+  const leftValue = normalizePathInput(left).toLowerCase();
+  const rightValue = normalizePathInput(right).toLowerCase();
+  return Boolean(leftValue) && leftValue === rightValue;
+}
+
+function normalizePathAlias(rawAlias) {
+  return String(rawAlias || "").trim();
 }
 
 function sourceNameFromPath(sourcePath) {
@@ -722,6 +734,9 @@ export default function LogAnalyzer() {
   const [timeTo, setTimeTo] = useState(initialSearchPreferences.timeTo);
   const [problemType, setProblemType] = useState(initialSearchPreferences.problemType);
   const [pathSuggestionInput, setPathSuggestionInput] = useState("");
+  const [showSavedPathHistory, setShowSavedPathHistory] = useState(true);
+  const [editingPathOriginal, setEditingPathOriginal] = useState("");
+  const [editingPathValue, setEditingPathValue] = useState("");
   const [searchText, setSearchText] = useState("");
   const [searchCaseSensitive, setSearchCaseSensitive] = useState(
     initialSearchPreferences.searchCaseSensitive
@@ -751,6 +766,9 @@ export default function LogAnalyzer() {
   );
   const [pathHistory, setPathHistory] = useState(() =>
     safeReadStorage(STORAGE_KEYS.pathHistory, [])
+  );
+  const [pathAliases, setPathAliases] = useState(() =>
+    safeReadStorage(STORAGE_KEYS.pathAliases, {})
   );
   const [uploadedFileLinks, setUploadedFileLinks] = useState({});
   const [webSourcePriority, setWebSourcePriority] = useState(() =>
@@ -783,6 +801,40 @@ export default function LogAnalyzer() {
     () => pathHistory.filter((path) => !parsedPaths.some((used) => used.toLowerCase() === path.toLowerCase())),
     [pathHistory, parsedPaths]
   );
+
+  const normalizedPathAliases = useMemo(() => {
+    const output = {};
+    if (!pathAliases || typeof pathAliases !== "object") return output;
+    for (const [rawPath, rawAlias] of Object.entries(pathAliases)) {
+      const key = normalizePathInput(rawPath).toLowerCase();
+      const alias = normalizePathAlias(rawAlias);
+      if (!key || !alias) continue;
+      output[key] = alias;
+    }
+    return output;
+  }, [pathAliases]);
+
+  function displayNameForSavedPath(path) {
+    const key = normalizePathInput(path).toLowerCase();
+    return normalizedPathAliases[key] || sourceNameFromPath(path);
+  }
+
+  function resolvePathFromSuggestion(rawValue) {
+    const normalized = normalizePathInput(rawValue);
+    if (!normalized) return "";
+
+    const exactPath = pathHistory.find((item) => isSamePathValue(item, normalized));
+    if (exactPath) return exactPath;
+
+    const aliasLookup = normalized.toLowerCase();
+    const aliasMatchKey = Object.keys(normalizedPathAliases).find(
+      (pathKey) => normalizedPathAliases[pathKey].toLowerCase() === aliasLookup
+    );
+    if (!aliasMatchKey) return normalized;
+
+    const aliasedPath = pathHistory.find((item) => normalizePathInput(item).toLowerCase() === aliasMatchKey);
+    return aliasedPath || normalized;
+  }
 
   const allEntries = useMemo(() => parseLogEntries(logs), [logs]);
   const trimmedSearchText = searchText.trim();
@@ -894,6 +946,32 @@ export default function LogAnalyzer() {
   useEffect(() => {
     safeWriteStorage(STORAGE_KEYS.pathHistory, pathHistory);
     void savePathHistoryToConfig(pathHistory, { replace: true });
+  }, [pathHistory]);
+
+  useEffect(() => {
+    safeWriteStorage(STORAGE_KEYS.pathAliases, normalizedPathAliases);
+  }, [normalizedPathAliases]);
+
+  useEffect(() => {
+    setPathAliases((prev) => {
+      if (!prev || typeof prev !== "object") return {};
+      const availableKeys = new Set(pathHistory.map((path) => normalizePathInput(path).toLowerCase()));
+      const next = {};
+      let changed = false;
+      for (const [rawKey, rawAlias] of Object.entries(prev)) {
+        const key = normalizePathInput(rawKey).toLowerCase();
+        const alias = normalizePathAlias(rawAlias);
+        if (!key || !alias || !availableKeys.has(key)) {
+          changed = true;
+          continue;
+        }
+        next[key] = alias;
+      }
+      if (!changed && Object.keys(next).length === Object.keys(prev).length) {
+        return prev;
+      }
+      return next;
+    });
   }, [pathHistory]);
 
   useEffect(() => {
@@ -1167,7 +1245,7 @@ export default function LogAnalyzer() {
   }
 
   function addPathToInput(rawPath) {
-    const nextPath = normalizePathInput(rawPath);
+    const nextPath = resolvePathFromSuggestion(rawPath);
     if (!nextPath) return;
 
     setPathListInput((prev) => {
@@ -1189,9 +1267,62 @@ export default function LogAnalyzer() {
     const shouldClear = window.confirm("Clear all saved path suggestions?");
     if (!shouldClear) return;
 
+    setEditingPathOriginal("");
+    setEditingPathValue("");
     setPathSuggestionInput("");
+    setPathAliases({});
     setPathHistory([]);
     await savePathHistoryToConfig([], { replace: true });
+  }
+
+  function startRenamingSavedPath(path) {
+    const normalized = normalizePathInput(path);
+    if (!normalized) return;
+    setEditingPathOriginal(normalized);
+    setEditingPathValue(displayNameForSavedPath(normalized));
+  }
+
+  function cancelRenamingSavedPath() {
+    setEditingPathOriginal("");
+    setEditingPathValue("");
+  }
+
+  function saveRenamedSavedPath() {
+    const fromPath = normalizePathInput(editingPathOriginal);
+    const alias = normalizePathAlias(editingPathValue);
+    if (!fromPath) return;
+    if (/[\r\n]/.test(alias)) {
+      window.alert("Display name cannot contain new lines.");
+      return;
+    }
+
+    const key = fromPath.toLowerCase();
+    const fallback = sourceNameFromPath(fromPath).toLowerCase();
+    setPathAliases((prev) => {
+      const next = { ...(prev && typeof prev === "object" ? prev : {}) };
+      if (!alias || alias.toLowerCase() === fallback) {
+        delete next[key];
+      } else {
+        next[key] = alias;
+      }
+      return next;
+    });
+    cancelRenamingSavedPath();
+  }
+
+  function removeSavedPath(path) {
+    const normalized = normalizePathInput(path);
+    if (!normalized) return;
+    setPathHistory((prev) => prev.filter((item) => !isSamePathValue(item, normalized)));
+    setPathAliases((prev) => {
+      const next = { ...(prev && typeof prev === "object" ? prev : {}) };
+      delete next[normalized.toLowerCase()];
+      return next;
+    });
+    setPathSuggestionInput((prev) => (isSamePathValue(prev, normalized) ? "" : prev));
+    if (isSamePathValue(editingPathOriginal, normalized)) {
+      cancelRenamingSavedPath();
+    }
   }
 
   function updateWebSourcePriorityAt(position, sourceId) {
@@ -1735,22 +1866,114 @@ export default function LogAnalyzer() {
                 onClick={() => addPathToInput(path)}
                 title={path}
               >
-                {sourceNameFromPath(path)}
+                {displayNameForSavedPath(path)}
               </button>
             ))}
           </div>
         ) : null}
         <div className="path-history-row">
           <small>Saved path history: {pathHistory.length} (max {PATH_HISTORY_LIMIT}).</small>
-          <button
-            type="button"
-            className="action-button action-danger"
-            onClick={clearSavedPaths}
-            disabled={!pathHistory.length}
-          >
-            Clear saved paths
-          </button>
+          <div className="path-history-actions">
+            <button
+              type="button"
+              className="action-button action-ghost"
+              onClick={() => setShowSavedPathHistory((prev) => !prev)}
+              disabled={!pathHistory.length}
+            >
+              {showSavedPathHistory ? "Hide path history" : "Show path history"}
+            </button>
+            {showSavedPathHistory ? (
+              <button
+                type="button"
+                className="action-button action-danger"
+                onClick={clearSavedPaths}
+                disabled={!pathHistory.length}
+              >
+                Clear saved paths
+              </button>
+            ) : null}
+          </div>
         </div>
+        {showSavedPathHistory && pathHistory.length ? (
+          <section className="saved-path-list">
+            {pathHistory.map((path) => {
+              const isEditing = isSamePathValue(editingPathOriginal, path);
+              return (
+                <article key={path} className="saved-path-item">
+                  {isEditing ? (
+                    <input
+                      type="text"
+                      value={editingPathValue}
+                      onChange={(event) => setEditingPathValue(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          saveRenamedSavedPath();
+                        }
+                        if (event.key === "Escape") {
+                          event.preventDefault();
+                          cancelRenamingSavedPath();
+                        }
+                      }}
+                    />
+                  ) : (
+                    <div className="saved-path-display">
+                      <p className="saved-path-label" title={displayNameForSavedPath(path)}>
+                        {displayNameForSavedPath(path)}
+                      </p>
+                      <code title={path}>{path}</code>
+                    </div>
+                  )}
+                  <div className="saved-path-actions">
+                    <button
+                      type="button"
+                      className="action-button action-ghost action-compact"
+                      onClick={() => addPathToInput(path)}
+                    >
+                      Use
+                    </button>
+                    {isEditing ? (
+                      <>
+                        <button
+                          type="button"
+                          className="action-button action-ghost action-compact"
+                          onClick={saveRenamedSavedPath}
+                          disabled={!normalizePathInput(editingPathValue)}
+                        >
+                          Save
+                        </button>
+                        <button
+                          type="button"
+                          className="action-button action-ghost action-compact"
+                          onClick={cancelRenamingSavedPath}
+                        >
+                          Cancel
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button
+                          type="button"
+                          className="action-button action-ghost action-compact"
+                          onClick={() => startRenamingSavedPath(path)}
+                        >
+                          Rename
+                        </button>
+                        <button
+                          type="button"
+                          className="action-button action-danger action-compact"
+                          onClick={() => removeSavedPath(path)}
+                        >
+                          Remove
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </article>
+              );
+            })}
+          </section>
+        ) : null}
         <div className="watch-controls">
           <div className="filter-field">
             <label htmlFor="poll-seconds">Refresh every (seconds)</label>
@@ -1962,9 +2185,9 @@ export default function LogAnalyzer() {
                         >
                           <p className="web-solution-title">
                             <strong>{solution.title || `Solution ${index + 1}`}</strong>
-                            {solution.source ? (
-                              <span className="muted"> ({solution.source})</span>
-                            ) : null}
+                          </p>
+                          <p className="web-solution-source">
+                            <strong>Source:</strong> {solution.source || "Web"}
                           </p>
                           <p className="web-solution-text">{solution.solution}</p>
                           {solution.url ? (

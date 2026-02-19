@@ -29,11 +29,23 @@ import org.springframework.stereotype.Service;
 public class WebSolutionsService {
   private static final String OPENAI_RESPONSES_API_URL = "https://api.openai.com/v1/responses";
   private static final String GOOGLE_CSE_API_URL = "https://www.googleapis.com/customsearch/v1";
+  private static final String HUGGINGFACE_CHAT_COMPLETIONS_API_URL =
+      "https://router.huggingface.co/v1/chat/completions";
   private static final String GROQ_CHAT_COMPLETIONS_API_URL = "https://api.groq.com/openai/v1/chat/completions";
   private static final String OPENROUTER_CHAT_COMPLETIONS_API_URL =
       "https://openrouter.ai/api/v1/chat/completions";
   private static final List<String> ALL_WEB_SOURCE_KEYS =
-      List.of("localai", "google", "gemini", "groq", "openrouter", "stackoverflow", "github", "chatgpt", "local");
+      List.of(
+          "localai",
+          "google",
+          "gemini",
+          "huggingface",
+          "groq",
+          "openrouter",
+          "stackoverflow",
+          "github",
+          "chatgpt",
+          "local");
   private static final Pattern EXCEPTION_CLASS_PATTERN =
       Pattern.compile(
           "\\b([A-Za-z_$][A-Za-z0-9_$]*(?:\\.[A-Za-z_$][A-Za-z0-9_$]*)*(?:Exception|Error|Throwable))\\b");
@@ -123,6 +135,21 @@ public class WebSolutionsService {
             solutions = mergeUniqueSolutions(solutions, geminiFree, limit);
           } catch (Exception exception) {
             warnings.add(exception.getMessage() == null ? "Gemini free search failed." : exception.getMessage());
+          }
+          break;
+
+        case "huggingface":
+          if (!settings.isEnableHuggingFaceSearch()) {
+            break;
+          }
+          if (!hasText(settings.getHuggingFaceApiKey())) {
+            break;
+          }
+          try {
+            List<WebSolutionItem> huggingFace = searchWithHuggingFace(query, finding, remaining);
+            solutions = mergeUniqueSolutions(solutions, huggingFace, limit);
+          } catch (Exception exception) {
+            warnings.add(exception.getMessage() == null ? "Hugging Face search failed." : exception.getMessage());
           }
           break;
 
@@ -228,6 +255,9 @@ public class WebSolutionsService {
       if (settings.isEnableGeminiFreeSearch() && hasText(settings.getGeminiApiKey())) {
         normalized.add("gemini");
       }
+      if (settings.isEnableHuggingFaceSearch() && hasText(settings.getHuggingFaceApiKey())) {
+        normalized.add("huggingface");
+      }
       if (settings.isEnableGroqFreeSearch() && hasText(settings.getGroqApiKey())) {
         normalized.add("groq");
       }
@@ -274,6 +304,9 @@ public class WebSolutionsService {
     }
     if ("gemini".equals(value) || "google-gemini".equals(value)) {
       return "gemini";
+    }
+    if ("huggingface".equals(value) || "hugging-face".equals(value) || "hf".equals(value)) {
+      return "huggingface";
     }
     if ("groq".equals(value) || "groq-free".equals(value) || "groqfree".equals(value)) {
       return "groq";
@@ -621,6 +654,49 @@ public class WebSolutionsService {
     return normalizeWebSolutionItems(candidates, "Gemini Free", maxSolutions);
   }
 
+  private List<WebSolutionItem> searchWithHuggingFace(
+      String query, Map<String, Object> finding, int maxSolutions)
+      throws IOException, InterruptedException {
+    Map<String, Object> payload = new LinkedHashMap<>();
+    payload.put("model", settings.getHuggingFaceModel());
+    payload.put("temperature", 0.1);
+    payload.put("max_tokens", 1400);
+    payload.put(
+        "messages",
+        List.of(
+            Map.of(
+                "role",
+                "system",
+                "content",
+                "You are an SRE assistant. Return only valid JSON with concise, practical fixes."),
+            Map.of("role", "user", "content", buildGenericLlmPrompt(query, finding, maxSolutions))));
+
+    HttpRequest request =
+        HttpRequest.newBuilder(URI.create(HUGGINGFACE_CHAT_COMPLETIONS_API_URL))
+            .timeout(Duration.ofSeconds(60))
+            .header("Content-Type", "application/json")
+            .header("Authorization", "Bearer " + settings.getHuggingFaceApiKey())
+            .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(payload)))
+            .build();
+
+    HttpResponse<String> response =
+        httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+    if (response.statusCode() < 200 || response.statusCode() >= 300) {
+      String suffix = truncate(response.body(), 160);
+      throw new IllegalStateException(
+          "Hugging Face search failed (" + response.statusCode() + "). " + suffix);
+    }
+
+    JsonNode responseJson = objectMapper.readTree(response.body());
+    String outputText = extractChatCompletionText(responseJson);
+    JsonNode parsed = parseJsonFromText(outputText);
+    if (parsed != null && parsed.isArray()) {
+      return normalizeWebSolutionItems(parsed, "Hugging Face", maxSolutions);
+    }
+    JsonNode candidates = parsed == null ? null : firstNonNull(parsed.get("solutions"), parsed.get("items"));
+    return normalizeWebSolutionItems(candidates, "Hugging Face", maxSolutions);
+  }
+
   private List<WebSolutionItem> searchWithGroqFree(
       String query, Map<String, Object> finding, int maxSolutions)
       throws IOException, InterruptedException {
@@ -867,6 +943,7 @@ public class WebSolutionsService {
     }
 
     List<WebSolutionItem> output = new ArrayList<>();
+    String providerSource = hasText(defaultSource) ? defaultSource.trim() : "Web";
     for (int i = 0; i < items.size(); i++) {
       JsonNode item = items.get(i);
       String title =
@@ -880,7 +957,11 @@ public class WebSolutionsService {
               readText(item, "resolution"),
               readText(item, "steps"),
               readText(item, "summary"));
-      String source = firstNonBlank(readText(item, "source"), defaultSource, "Web");
+      String modelSource = safe(readText(item, "source")).trim();
+      String source = providerSource;
+      if (hasText(modelSource) && !providerSource.equalsIgnoreCase(modelSource)) {
+        source = providerSource + " | " + truncate(modelSource, 60);
+      }
       String url = firstNonBlank(readText(item, "url"), readText(item, "link"), readText(item, "reference"), "");
       if (!hasText(title) || !hasText(solution)) {
         continue;
