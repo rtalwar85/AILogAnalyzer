@@ -80,6 +80,194 @@ const RULES = [
   },
 ];
 
+const ISSUE_CLASSIFICATION_BUCKETS = [
+  {
+    id: "db2-jdbc-connectivity",
+    label: "DB2 / JDBC connectivity",
+    severity: "high",
+    resolution:
+      "Validate DB2 host/port and credentials, confirm driver compatibility, and review pool/socket timeout settings.",
+    signals: [
+      { regex: /sqlstate\s*=?\s*08001/i, label: "SQLSTATE 08001" },
+      { regex: /communications link failure/i, label: "Communications link failure" },
+      { regex: /com\.ibm\.db2\.jcc/i, label: "DB2 JDBC driver stack" },
+      { regex: /sql30081n|sql1224n/i, label: "DB2 network/connectivity SQL code" },
+      { regex: /jdbc.*(connect|connection|timeout|refused|authentication)/i, label: "JDBC connect/auth failure" },
+      { regex: /db2.*(connect|connection|timeout|refused|authentication)/i, label: "DB2 connect/auth failure" },
+      {
+        regex: /could not connect to server|connection refused|connection reset|login timeout/i,
+        label: "Connection failure",
+      },
+    ],
+  },
+  {
+    id: "db2-sql-syntax-query",
+    label: "DB2 SQL syntax / query errors",
+    severity: "medium",
+    resolution:
+      "Check generated SQL and bind variables, fix syntax/token errors, and verify schema/object names against target DB2 version.",
+    signals: [
+      { regex: /sqlcode\s*=?\s*-104/i, label: "SQLCODE -104" },
+      { regex: /sqlcode\s*=?\s*-727/i, label: "SQLCODE -727" },
+      { regex: /sqlstate\s*=?\s*42601/i, label: "SQLSTATE 42601" },
+      { regex: /sql syntax|syntax error|unexpected token/i, label: "SQL syntax/token error" },
+      { regex: /db2 sql error|sql error/i, label: "DB2 SQL error" },
+    ],
+  },
+  {
+    id: "jvm-memory",
+    label: "JVM memory",
+    severity: "high",
+    resolution:
+      "Review heap usage and allocation rate, tune JVM memory settings, and investigate leaks or unbounded object retention.",
+    signals: [
+      { regex: /outofmemoryerror|out of memory|java heap space/i, label: "Heap OOM" },
+      { regex: /gc overhead limit exceeded|gc thrash|full gc/i, label: "GC pressure" },
+      { regex: /metaspace|direct buffer memory/i, label: "Metaspace/direct memory pressure" },
+      { regex: /unable to create new native thread/i, label: "Native thread/resource exhaustion" },
+    ],
+  },
+  {
+    id: "threads-deadlock-hung",
+    label: "Threads / deadlock / hung requests",
+    severity: "high",
+    resolution:
+      "Inspect thread dumps, identify lock contention and blocking I/O, and add timeout/circuit-breaker protections on stuck paths.",
+    signals: [
+      { regex: /deadlock|found one java-level deadlock/i, label: "Deadlock detected" },
+      { regex: /stuck thread|hung thread|thread hung/i, label: "Stuck/hung thread" },
+      { regex: /servlet.*timeout|request.*timeout/i, label: "Servlet/request timeout" },
+      { regex: /blocked for \d+ ms|waiting to lock/i, label: "Lock/block wait" },
+    ],
+  },
+  {
+    id: "ssl-tls-certs",
+    label: "SSL/TLS / certs",
+    severity: "high",
+    resolution:
+      "Validate truststore/keystore contents, certificate chain and expiry, and align TLS protocol/cipher configuration between peers.",
+    signals: [
+      { regex: /sslhandshakeexception|tls handshake/i, label: "Handshake failure" },
+      {
+        regex: /pkix path building failed|unable to find valid certification path/i,
+        label: "Trust chain validation failure",
+      },
+      { regex: /certificate expired|unable to parse certificate/i, label: "Certificate validity issue" },
+      { regex: /truststore|keystore|sun\.security\.validator/i, label: "Truststore/keystore issue" },
+    ],
+  },
+  {
+    id: "search-solr-indexing",
+    label: "Search (Solr) / indexing",
+    severity: "medium",
+    resolution:
+      "Check Solr core/collection health, replica status, and indexing pipeline consistency; then replay failed indexing work.",
+    signals: [
+      { regex: /\bsolr\b|solrserverexception/i, label: "Solr error" },
+      { regex: /index(?:ing)? failed|index out of bounds|index corruption/i, label: "Indexing failure" },
+      {
+        regex: /core.*unavailable|collection.*down|replica.*down/i,
+        label: "Solr core/collection availability issue",
+      },
+      { regex: /search query failed|queryparser/i, label: "Search query failure" },
+    ],
+  },
+  {
+    id: "cache-session",
+    label: "Cache/session (dynacache, session invalidation)",
+    severity: "medium",
+    resolution:
+      "Review cache key lifecycle and invalidation strategy, and verify session affinity/replication behavior across nodes.",
+    signals: [
+      { regex: /dynacache|cache miss|cache invalidation|evict/i, label: "Cache lifecycle issue" },
+      { regex: /session invalid|session expired|invalid session/i, label: "Session invalidation/expiry" },
+      { regex: /session replication|sticky session|affinity/i, label: "Session affinity/replication issue" },
+    ],
+  },
+  {
+    id: "auth-security",
+    label: "Auth/security (SSO, tokens, 401/403)",
+    severity: "medium",
+    resolution:
+      "Validate SSO and token claims/expiry, verify role-to-resource mappings, and confirm authorization policy behavior end-to-end.",
+    signals: [
+      { regex: /\b401\b|\b403\b|unauthorized|forbidden/i, label: "401/403 authz failure" },
+      { regex: /sso|oauth|openid|jwt|token expired|invalid token|signature/i, label: "SSO/token validation issue" },
+      { regex: /access denied|permission denied|authorization failed/i, label: "Authorization policy failure" },
+    ],
+  },
+  {
+    id: "integration-outbound-timeout",
+    label: "Integration / outbound timeout (payment, tax, OMS)",
+    severity: "high",
+    resolution:
+      "Trace downstream dependency latency and retries, tune client timeouts, and protect callers with fallback/circuit-breaker behavior.",
+    signals: [
+      { regex: /payment|tax service|oms|order management/i, label: "Named downstream dependency" },
+      { regex: /connect timed out|read timed out|sockettimeout/i, label: "Outbound timeout" },
+      {
+        regex: /httpclienterror|resourceaccessexception|upstream timeout|gateway timeout/i,
+        label: "Outbound HTTP timeout/error",
+      },
+      { regex: /failed to call|downstream|remote service/i, label: "Dependency call failure" },
+    ],
+  },
+  {
+    id: "app-bug-runtime-config",
+    label: "App bug / NullPointer / ClassNotFound / config",
+    severity: "medium",
+    resolution:
+      "Fix null-handling and defensive guards, verify classpath/dependency alignment, and validate runtime configuration values.",
+    signals: [
+      { regex: /nullpointerexception|illegalstateexception|illegalargumentexception/i, label: "Runtime exception" },
+      { regex: /classnotfoundexception|noclassdeffounderror|nosuchmethoderror/i, label: "Classpath/dependency mismatch" },
+      {
+        regex: /beancreationexception|failed to bind properties|configuration error|missing required property/i,
+        label: "Application configuration failure",
+      },
+      { regex: /unhandled exception|traceback/i, label: "Unhandled app exception" },
+    ],
+  },
+  {
+    id: "filesystem-permissions-io",
+    label: "File system / permissions / I/O",
+    severity: "medium",
+    resolution:
+      "Validate file path correctness and access permissions, ensure mount/share availability, and check disk capacity and I/O errors.",
+    signals: [
+      { regex: /accessdeniedexception|permission denied|eacces/i, label: "Permission denied" },
+      { regex: /nosuchfileexception|file not found|path not found/i, label: "Missing path/file" },
+      { regex: /disk full|no space left on device|i\/o error|input\/output error/i, label: "Disk/I-O failure" },
+      { regex: /failed reading all configured paths|failed to read/i, label: "Path read failure" },
+    ],
+  },
+  {
+    id: "network-dns-routing",
+    label: "Network / DNS / routing",
+    severity: "high",
+    resolution:
+      "Verify DNS resolution, route/firewall rules, and service endpoint reachability from the application host network.",
+    signals: [
+      { regex: /unknownhostexception|name or service not known|dns/i, label: "DNS resolution issue" },
+      { regex: /no route to host|network is unreachable|host unreachable/i, label: "Routing/reachability issue" },
+      { regex: /connection reset by peer|broken pipe/i, label: "Network connection drop" },
+    ],
+  },
+];
+
+const DEFAULT_ISSUE_CLASSIFICATION = {
+  id: "unclassified-runtime",
+  label: "Unclassified runtime issue",
+  severity: "low",
+  resolution:
+    "Capture a wider log window around first failure and include correlated upstream/downstream request IDs for reclassification.",
+  matchedSignals: [],
+};
+
+const ISSUE_CLASSIFICATION_ORDER = new Map(
+  ISSUE_CLASSIFICATION_BUCKETS.map((bucket, index) => [bucket.id, index])
+);
+
 function safeReadStorage(key, fallback) {
   if (typeof window === "undefined") return fallback;
   try {
@@ -124,6 +312,56 @@ function isSamePathValue(left, right) {
 
 function normalizePathAlias(rawAlias) {
   return String(rawAlias || "").trim();
+}
+
+function normalizePathForCompare(rawPath) {
+  return normalizePathInput(rawPath).replace(/\//g, "\\").toLowerCase();
+}
+
+function isRootedOrCloudPath(rawPath) {
+  const normalized = normalizePathInput(rawPath);
+  if (!normalized) return false;
+  if (normalized.startsWith("\\\\")) return true;
+  if (normalized.startsWith("/")) return true;
+  if (/^[A-Za-z]:[\\/]/.test(normalized)) return true;
+  return /^(s3|gs|az|https?):\/\//i.test(normalized);
+}
+
+function resolvePathAgainstCatalog(rawValue, catalogPaths, aliasByPathKey = {}) {
+  const normalized = normalizePathInput(rawValue);
+  if (!normalized) return "";
+  const catalog = Array.isArray(catalogPaths) ? catalogPaths : [];
+
+  const aliasLookup = normalized.toLowerCase();
+  const aliasMatchKey = Object.keys(aliasByPathKey || {}).find(
+    (pathKey) => String(aliasByPathKey[pathKey] || "").toLowerCase() === aliasLookup
+  );
+  if (aliasMatchKey) {
+    const aliasedPath = catalog.find((item) => normalizePathInput(item).toLowerCase() === aliasMatchKey);
+    if (aliasedPath) return aliasedPath;
+  }
+
+  const target = normalizePathForCompare(normalized);
+  const targetWithBoundary = target.startsWith("\\") ? target : `\\${target}`;
+  const suffixMatches = catalog.filter((item) => {
+    const candidate = normalizePathForCompare(item);
+    return candidate === target || candidate.endsWith(targetWithBoundary);
+  });
+
+  const rootedSuffixMatches = suffixMatches.filter((item) => isRootedOrCloudPath(item));
+  if (rootedSuffixMatches.length === 1) {
+    return rootedSuffixMatches[0];
+  }
+  if (suffixMatches.length === 1) {
+    return suffixMatches[0];
+  }
+
+  const exactPath = catalog.find((item) => isSamePathValue(item, normalized));
+  if (exactPath) {
+    return exactPath;
+  }
+
+  return normalized;
 }
 
 function sourceNameFromPath(sourcePath) {
@@ -223,9 +461,11 @@ function searchInEntries(entries, query, caseSensitive, maxResults = SEARCH_MAX_
 }
 
 function mergePathHistory(existingPaths, incomingPaths, limit = PATH_HISTORY_LIMIT) {
+  const safeExisting = Array.isArray(existingPaths) ? existingPaths : [];
+  const safeIncoming = Array.isArray(incomingPaths) ? incomingPaths : [];
   const merged = [];
   const seen = new Set();
-  const source = [...incomingPaths, ...existingPaths];
+  const source = [...safeIncoming, ...safeExisting];
 
   for (const item of source) {
     const pathValue = normalizePathInput(item);
@@ -235,6 +475,13 @@ function mergePathHistory(existingPaths, incomingPaths, limit = PATH_HISTORY_LIM
     seen.add(dedupeKey);
     merged.push(pathValue);
     if (merged.length >= limit) break;
+  }
+
+  const isUnchanged =
+    merged.length === safeExisting.length &&
+    merged.every((item, index) => isSamePathValue(item, safeExisting[index]));
+  if (isUnchanged) {
+    return safeExisting;
   }
 
   return merged;
@@ -444,6 +691,10 @@ function inferSeverityFromGroup(exceptionName, evidenceLines) {
   return "low";
 }
 
+function strongerSeverity(left = "low", right = "low") {
+  return severityScore(left) >= severityScore(right) ? left : right;
+}
+
 function pickBestRuleForEvidence(evidenceLines) {
   let best = null;
   for (const rule of RULES) {
@@ -454,6 +705,57 @@ function pickBestRuleForEvidence(evidenceLines) {
     }
   }
   return best?.rule || null;
+}
+
+function classifyFindingByTaxonomy(item) {
+  const evidenceLines = Array.isArray(item.evidence) ? item.evidence : [];
+  const context = [item.title, item.categoryLabel, item.sourceName, ...evidenceLines.slice(0, 12)]
+    .filter(Boolean)
+    .join("\n");
+
+  let best = null;
+  for (const bucket of ISSUE_CLASSIFICATION_BUCKETS) {
+    const matchedSignals = [];
+    let score = 0;
+    for (const signal of bucket.signals) {
+      if (signal.regex.test(context)) {
+        score += 1;
+        matchedSignals.push(signal.label);
+      }
+    }
+    if (!score) continue;
+    if (!best || score > best.score) {
+      best = { bucket, score, matchedSignals };
+    }
+  }
+
+  if (!best) {
+    return { ...DEFAULT_ISSUE_CLASSIFICATION };
+  }
+
+  return {
+    id: best.bucket.id,
+    label: best.bucket.label,
+    severity: best.bucket.severity,
+    resolution: best.bucket.resolution,
+    matchedSignals: best.matchedSignals.slice(0, 3),
+  };
+}
+
+function findingTypeKey(item) {
+  const classificationKey = item.classificationKey;
+  if (classificationKey && classificationKey !== DEFAULT_ISSUE_CLASSIFICATION.id) {
+    return classificationKey;
+  }
+  return item.categoryKey || item.id;
+}
+
+function findingTypeLabel(item) {
+  const classificationKey = item.classificationKey;
+  if (classificationKey && classificationKey !== DEFAULT_ISSUE_CLASSIFICATION.id) {
+    return item.classificationLabel || item.categoryLabel || item.title;
+  }
+  return item.categoryLabel || item.title;
 }
 
 function buildLearnedFindings(entries, learnedScenarios) {
@@ -572,9 +874,18 @@ function analyzeWithRules(entries, learnedScenarios) {
   }
 
   const learnedFindings = buildLearnedFindings(entries, learnedScenarios);
-  return dedupeFindings([...findings, ...learnedFindings]).sort(
-    (a, b) => severityScore(b.severity) - severityScore(a.severity)
-  );
+  const classified = dedupeFindings([...findings, ...learnedFindings]).map((item) => {
+    const classification = classifyFindingByTaxonomy(item);
+    return {
+      ...item,
+      classificationKey: classification.id,
+      classificationLabel: classification.label,
+      classificationSignals: classification.matchedSignals || [],
+      severity: strongerSeverity(item.severity, classification.severity),
+    };
+  });
+
+  return classified.sort((a, b) => severityScore(b.severity) - severityScore(a.severity));
 }
 
 function parseTimestamp(line) {
@@ -733,8 +1044,9 @@ export default function LogAnalyzer() {
   const [timeFrom, setTimeFrom] = useState(initialSearchPreferences.timeFrom);
   const [timeTo, setTimeTo] = useState(initialSearchPreferences.timeTo);
   const [problemType, setProblemType] = useState(initialSearchPreferences.problemType);
+  const [showTopFilters, setShowTopFilters] = useState(true);
   const [pathSuggestionInput, setPathSuggestionInput] = useState("");
-  const [showSavedPathHistory, setShowSavedPathHistory] = useState(true);
+  const [showSavedPathHistory, setShowSavedPathHistory] = useState(false);
   const [editingPathOriginal, setEditingPathOriginal] = useState("");
   const [editingPathValue, setEditingPathValue] = useState("");
   const [searchText, setSearchText] = useState("");
@@ -774,7 +1086,6 @@ export default function LogAnalyzer() {
   const [webSourcePriority, setWebSourcePriority] = useState(() =>
     normalizeWebSourcePriority(initialSearchPreferences.webSourcePriority)
   );
-  const [showWebSourcePriority, setShowWebSourcePriority] = useState(false);
   const [preferencesReady, setPreferencesReady] = useState(false);
   const problemTypeDropdownRef = useRef(null);
   const exclusionDropdownRef = useRef(null);
@@ -785,21 +1096,6 @@ export default function LogAnalyzer() {
         import.meta.env.VITE_LOG_ANALYZER_ENDPOINT || import.meta.env.VITE_OPENAI_API_KEY
       ),
     []
-  );
-
-  const parsedPaths = useMemo(() => {
-    const unique = new Set(
-      pathListInput
-        .split(/\r?\n|,/)
-        .map((item) => normalizePathInput(item))
-        .filter(Boolean)
-    );
-    return [...unique].slice(0, MAX_FILES);
-  }, [pathListInput]);
-
-  const pathSuggestions = useMemo(
-    () => pathHistory.filter((path) => !parsedPaths.some((used) => used.toLowerCase() === path.toLowerCase())),
-    [pathHistory, parsedPaths]
   );
 
   const normalizedPathAliases = useMemo(() => {
@@ -820,21 +1116,23 @@ export default function LogAnalyzer() {
   }
 
   function resolvePathFromSuggestion(rawValue) {
-    const normalized = normalizePathInput(rawValue);
-    if (!normalized) return "";
-
-    const exactPath = pathHistory.find((item) => isSamePathValue(item, normalized));
-    if (exactPath) return exactPath;
-
-    const aliasLookup = normalized.toLowerCase();
-    const aliasMatchKey = Object.keys(normalizedPathAliases).find(
-      (pathKey) => normalizedPathAliases[pathKey].toLowerCase() === aliasLookup
-    );
-    if (!aliasMatchKey) return normalized;
-
-    const aliasedPath = pathHistory.find((item) => normalizePathInput(item).toLowerCase() === aliasMatchKey);
-    return aliasedPath || normalized;
+    return resolvePathAgainstCatalog(rawValue, pathHistory, normalizedPathAliases);
   }
+
+  const parsedPaths = useMemo(() => {
+    const unique = new Set(
+      pathListInput
+        .split(/\r?\n|,/)
+        .map((item) => resolvePathFromSuggestion(item))
+        .filter(Boolean)
+    );
+    return [...unique].slice(0, MAX_FILES);
+  }, [pathListInput, pathHistory, normalizedPathAliases]);
+
+  const pathSuggestions = useMemo(
+    () => pathHistory.filter((path) => !parsedPaths.some((used) => used.toLowerCase() === path.toLowerCase())),
+    [pathHistory, parsedPaths]
+  );
 
   const allEntries = useMemo(() => parseLogEntries(logs), [logs]);
   const trimmedSearchText = searchText.trim();
@@ -1126,36 +1424,23 @@ export default function LogAnalyzer() {
     const tick = async () => {
       if (inFlight) return;
       inFlight = true;
-      const settled = await Promise.allSettled(
-        parsedPaths.map(async (path) => ({ path, content: await fetchLogsFromPath(path) }))
-      );
       try {
+        const readResult = await readConfiguredPathsOnce(parsedPaths);
         if (cancelled) return;
 
-        const successes = settled
-          .filter((result) => result.status === "fulfilled")
-          .map((result) => result.value);
-        const failures = settled.filter((result) => result.status === "rejected").length;
-
-        if (!successes.length) {
-          setError("Failed reading all configured paths.");
-          return;
-        }
-
-        const mergedLogs = successes
-          .map((item) => `--- PATH: ${item.path} ---\n${item.content}`)
-          .join("\n\n");
-
         setUploadedFileLinks({});
-        setLogs(mergedLogs);
+        setLogs(readResult.mergedLogs);
         setLastReadAt(new Date().toLocaleString());
-        setError(failures ? `Read ${successes.length}/${parsedPaths.length} paths.` : "");
+        setError(readResult.failures ? `Read ${readResult.successes}/${parsedPaths.length} paths.` : "");
 
         try {
-          await analyzeLogs(mergedLogs, false);
+          await analyzeLogs(readResult.mergedLogs, false);
         } catch (e) {
           setError(e instanceof Error ? e.message : "Auto analyze failed.");
         }
+      } catch (e) {
+        if (cancelled) return;
+        setError(e instanceof Error ? e.message : "Failed reading all configured paths.");
       } finally {
         inFlight = false;
       }
@@ -1172,25 +1457,67 @@ export default function LogAnalyzer() {
 
   const visibleFindings = useMemo(() => {
     if (problemType === "all") return findings;
-    return findings.filter((item) => (item.categoryKey || item.id) === problemType);
+    return findings.filter((item) => findingTypeKey(item) === problemType);
   }, [findings, problemType]);
 
   const problemTypeOptions = useMemo(() => {
     const map = new Map();
     findings.forEach((item) => {
-      const key = item.categoryKey || item.id;
-      const label = item.categoryLabel || item.title;
+      const key = findingTypeKey(item);
+      const label = findingTypeLabel(item);
       if (!map.has(key)) {
         map.set(key, label);
       }
     });
-    return [...map.entries()].map(([id, title]) => ({ id, title }));
+    return [...map.entries()]
+      .map(([id, title]) => ({ id, title }))
+      .sort((a, b) => {
+        const leftOrder = ISSUE_CLASSIFICATION_ORDER.has(a.id)
+          ? ISSUE_CLASSIFICATION_ORDER.get(a.id)
+          : Number.MAX_SAFE_INTEGER;
+        const rightOrder = ISSUE_CLASSIFICATION_ORDER.has(b.id)
+          ? ISSUE_CLASSIFICATION_ORDER.get(b.id)
+          : Number.MAX_SAFE_INTEGER;
+        if (leftOrder !== rightOrder) {
+          return leftOrder - rightOrder;
+        }
+        return a.title.localeCompare(b.title);
+      });
   }, [findings]);
 
   const problemTypeLabel = useMemo(() => {
     if (problemType === "all") return "All problems";
     return problemTypeOptions.find((item) => item.id === problemType)?.title || "All problems";
   }, [problemType, problemTypeOptions]);
+
+  const classificationSummary = useMemo(() => {
+    const map = new Map();
+    findings.forEach((item) => {
+      const key = findingTypeKey(item);
+      const label = findingTypeLabel(item);
+      const count = Number(item.count || 0);
+      if (!map.has(key)) {
+        map.set(key, { id: key, label, findings: 0, occurrences: 0, severity: "low" });
+      }
+      const current = map.get(key);
+      current.findings += 1;
+      current.occurrences += count > 0 ? count : 1;
+      current.severity = strongerSeverity(current.severity, item.severity || "low");
+    });
+    return [...map.values()].sort((a, b) => {
+      const leftOrder = ISSUE_CLASSIFICATION_ORDER.has(a.id)
+        ? ISSUE_CLASSIFICATION_ORDER.get(a.id)
+        : Number.MAX_SAFE_INTEGER;
+      const rightOrder = ISSUE_CLASSIFICATION_ORDER.has(b.id)
+        ? ISSUE_CLASSIFICATION_ORDER.get(b.id)
+        : Number.MAX_SAFE_INTEGER;
+      if (leftOrder !== rightOrder) {
+        return leftOrder - rightOrder;
+      }
+      if (b.findings !== a.findings) return b.findings - a.findings;
+      return b.occurrences - a.occurrences;
+    });
+  }, [findings]);
 
   useEffect(() => {
     if (problemType === "all") return;
@@ -1366,6 +1693,7 @@ export default function LogAnalyzer() {
           finding: {
             title: item.title,
             categoryLabel: item.categoryLabel,
+            classificationLabel: item.classificationLabel,
             sourceName: item.sourceName,
             resolution: item.resolution,
             evidence: item.evidence?.slice(0, 10),
@@ -1492,21 +1820,74 @@ export default function LogAnalyzer() {
     });
   }
 
+  async function readConfiguredPathsOnce(paths) {
+    async function readMany(targetPaths) {
+      const settled = await Promise.allSettled(
+        targetPaths.map(async (path) => ({ path, content: await fetchLogsFromPath(path) }))
+      );
+      const successes = settled
+        .filter((result) => result.status === "fulfilled")
+        .map((result) => result.value);
+      const failures = settled.filter((result) => result.status === "rejected").length;
+      const firstError = settled.find((result) => result.status === "rejected")?.reason;
+      return { successes, failures, firstError };
+    }
+
+    const first = await readMany(paths);
+    if (first.successes.length) {
+      const mergedLogs = first.successes
+        .map((item) => `--- PATH: ${item.path} ---\n${item.content}`)
+        .join("\n\n");
+      return { mergedLogs, successes: first.successes.length, failures: first.failures };
+    }
+
+    const remoteHistory = await loadPathHistoryFromConfig();
+    const catalog = mergePathHistory(pathHistory, remoteHistory, PATH_HISTORY_LIMIT);
+    const remapped = [...new Set(paths.map((item) => resolvePathAgainstCatalog(item, catalog, normalizedPathAliases)))];
+    const hasChanged =
+      remapped.length !== paths.length ||
+      remapped.some((item, index) => !isSamePathValue(item, paths[index]));
+
+    if (hasChanged) {
+      const retry = await readMany(remapped);
+      if (retry.successes.length) {
+        const mergedLogs = retry.successes
+          .map((item) => `--- PATH: ${item.path} ---\n${item.content}`)
+          .join("\n\n");
+        return { mergedLogs, successes: retry.successes.length, failures: retry.failures };
+      }
+      const retryError =
+        retry.firstError instanceof Error ? retry.firstError.message : "Failed reading all configured paths.";
+      throw new Error(`Failed reading all configured paths. ${retryError}`);
+    }
+
+    const firstError =
+      first.firstError instanceof Error ? first.firstError.message : "Failed reading all configured paths.";
+    throw new Error(`Failed reading all configured paths. ${firstError}`);
+  }
+
   async function onAnalyze() {
-    if (parsedPaths.length) {
-      setPathHistory((prev) => mergePathHistory(prev, parsedPaths));
-    }
-
-    if (!logs.trim()) {
-      setError("Add logs first.");
-      return;
-    }
-
     setBusy(true);
     setError("");
     setAiResult(null);
 
     try {
+      if (parsedPaths.length) {
+        setPathHistory((prev) => mergePathHistory(prev, parsedPaths));
+        const readResult = await readConfiguredPathsOnce(parsedPaths);
+        setUploadedFileLinks({});
+        setLogs(readResult.mergedLogs);
+        setLastReadAt(new Date().toLocaleString());
+        setError(readResult.failures ? `Read ${readResult.successes}/${parsedPaths.length} paths.` : "");
+        await analyzeLogs(readResult.mergedLogs, true);
+        return;
+      }
+
+      if (!logs.trim()) {
+        setError("Add logs first.");
+        return;
+      }
+
       await analyzeLogs(logs, true);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Analysis failed.");
@@ -1540,6 +1921,16 @@ export default function LogAnalyzer() {
     setAutoRead(false);
   }
 
+  function toggleTopFilters() {
+    setShowTopFilters((prev) => {
+      const next = !prev;
+      if (!next) {
+        setIsProblemTypeDropdownOpen(false);
+      }
+      return next;
+    });
+  }
+
   return (
     <main className="log-analyzer">
       <section className="hero">
@@ -1567,142 +1958,147 @@ export default function LogAnalyzer() {
           </button>
         </div>
 
-        <div className="filters top-filters">
-          <div className="filter-field">
-            <label htmlFor="problem-type">Problem type</label>
-            <div className="single-select-dropdown" ref={problemTypeDropdownRef}>
-              <button
-                id="problem-type"
-                type="button"
-                className={`single-select-trigger ${isProblemTypeDropdownOpen ? "is-open" : ""}`}
-                onClick={() => setIsProblemTypeDropdownOpen((prev) => !prev)}
-                aria-expanded={isProblemTypeDropdownOpen}
-                aria-controls="problem-type-menu"
-              >
-                <span className="single-select-trigger-text">{problemTypeLabel}</span>
-              </button>
-              {isProblemTypeDropdownOpen ? (
-                <div id="problem-type-menu" className="single-select-menu" role="listbox">
-                  <button
-                    type="button"
-                    className={`single-select-option ${problemType === "all" ? "is-selected" : ""}`}
-                    onClick={() => {
-                      setProblemType("all");
-                      setIsProblemTypeDropdownOpen(false);
-                    }}
-                  >
-                    <span>All problems</span>
-                  </button>
-                  {problemTypeOptions.map((item) => (
+        <section className="filters-shell">
+          <div className={`filter-toggle-row ${showTopFilters ? "is-open" : ""}`}>
+            <small>Filters And Priority</small>
+            <button
+              type="button"
+              className="action-button action-ghost"
+              onClick={toggleTopFilters}
+              aria-expanded={showTopFilters}
+            >
+              {showTopFilters ? "Hide filters" : "Show filters"}
+            </button>
+          </div>
+          {showTopFilters ? (
+            <>
+              <div className="filters top-filters">
+                <div className="filter-field">
+                  <label htmlFor="problem-type">Problem type</label>
+                  <div className="single-select-dropdown" ref={problemTypeDropdownRef}>
                     <button
-                      key={item.id}
+                      id="problem-type"
                       type="button"
-                      className={`single-select-option ${
-                        problemType === item.id ? "is-selected" : ""
-                      }`}
-                      onClick={() => {
-                        setProblemType(item.id);
-                        setIsProblemTypeDropdownOpen(false);
-                      }}
-                      title={item.title}
+                      className={`single-select-trigger ${isProblemTypeDropdownOpen ? "is-open" : ""}`}
+                      onClick={() => setIsProblemTypeDropdownOpen((prev) => !prev)}
+                      aria-expanded={isProblemTypeDropdownOpen}
+                      aria-controls="problem-type-menu"
                     >
-                      <span>{item.title}</span>
+                      <span className="single-select-trigger-text">{problemTypeLabel}</span>
                     </button>
+                    {isProblemTypeDropdownOpen ? (
+                      <div id="problem-type-menu" className="single-select-menu" role="listbox">
+                        <button
+                          type="button"
+                          className={`single-select-option ${problemType === "all" ? "is-selected" : ""}`}
+                          onClick={() => {
+                            setProblemType("all");
+                            setIsProblemTypeDropdownOpen(false);
+                          }}
+                        >
+                          <span>All problems</span>
+                        </button>
+                        {problemTypeOptions.map((item) => (
+                          <button
+                            key={item.id}
+                            type="button"
+                            className={`single-select-option ${
+                              problemType === item.id ? "is-selected" : ""
+                            }`}
+                            onClick={() => {
+                              setProblemType(item.id);
+                              setIsProblemTypeDropdownOpen(false);
+                            }}
+                            title={item.title}
+                          >
+                            <span>{item.title}</span>
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+                <div className="filter-field">
+                  <label htmlFor="date-from">Date from</label>
+                  <input
+                    id="date-from"
+                    type="date"
+                    value={dateFrom}
+                    onChange={(event) => setDateFrom(event.target.value)}
+                  />
+                </div>
+                <div className="filter-field">
+                  <label htmlFor="date-to">Date to</label>
+                  <input
+                    id="date-to"
+                    type="date"
+                    value={dateTo}
+                    onChange={(event) => setDateTo(event.target.value)}
+                  />
+                </div>
+                <div className="filter-field">
+                  <label htmlFor="time-from">Time from</label>
+                  <input
+                    id="time-from"
+                    type="time"
+                    value={timeFrom}
+                    onChange={(event) => setTimeFrom(event.target.value)}
+                  />
+                </div>
+                <div className="filter-field">
+                  <label htmlFor="time-to">Time to</label>
+                  <input
+                    id="time-to"
+                    type="time"
+                    value={timeTo}
+                    onChange={(event) => setTimeTo(event.target.value)}
+                  />
+                </div>
+              </div>
+
+              <section className="web-source-priority-panel">
+                <div className="web-source-priority-header">
+                  <div>
+                    <h3>Web Resolution Source Priority</h3>
+                    <p className="muted">Applied live when you click "Find Web Solutions".</p>
+                  </div>
+                  <div className="web-source-priority-actions">
+                    <button
+                      type="button"
+                      className="action-button action-ghost"
+                      onClick={resetWebSourcePriority}
+                    >
+                      Reset order
+                    </button>
+                  </div>
+                </div>
+                <div className="web-source-priority-grid">
+                  {normalizeWebSourcePriority(webSourcePriority).map((sourceId, index) => (
+                    <div key={`priority-${index}`} className="filter-field">
+                      <label htmlFor={`source-priority-${index}`}>Priority {index + 1}</label>
+                      <select
+                        id={`source-priority-${index}`}
+                        value={sourceId}
+                        onChange={(event) => updateWebSourcePriorityAt(index, event.target.value)}
+                      >
+                        {WEB_SOURCE_OPTIONS.map((option) => (
+                          <option key={option.id} value={option.id}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
                   ))}
                 </div>
-              ) : null}
-            </div>
-          </div>
-          <div className="filter-field">
-            <label htmlFor="date-from">Date from</label>
-            <input
-              id="date-from"
-              type="date"
-              value={dateFrom}
-              onChange={(event) => setDateFrom(event.target.value)}
-            />
-          </div>
-          <div className="filter-field">
-            <label htmlFor="date-to">Date to</label>
-            <input
-              id="date-to"
-              type="date"
-              value={dateTo}
-              onChange={(event) => setDateTo(event.target.value)}
-            />
-          </div>
-          <div className="filter-field">
-            <label htmlFor="time-from">Time from</label>
-            <input
-              id="time-from"
-              type="time"
-              value={timeFrom}
-              onChange={(event) => setTimeFrom(event.target.value)}
-            />
-          </div>
-          <div className="filter-field">
-            <label htmlFor="time-to">Time to</label>
-            <input
-              id="time-to"
-              type="time"
-              value={timeTo}
-              onChange={(event) => setTimeTo(event.target.value)}
-            />
-          </div>
-        </div>
-
-        <section className="web-source-priority-panel">
-          <div className="web-source-priority-header">
-            <div>
-              <h3>Web Resolution Source Priority</h3>
-              <p className="muted">Applied live when you click "Find Web Solutions".</p>
-            </div>
-            <div className="web-source-priority-actions">
-              <button
-                type="button"
-                className="action-button action-ghost"
-                onClick={() => setShowWebSourcePriority((prev) => !prev)}
-                aria-expanded={showWebSourcePriority}
-              >
-                {showWebSourcePriority ? "Hide" : "Show"}
-              </button>
-              <button
-                type="button"
-                className="action-button action-ghost"
-                onClick={resetWebSourcePriority}
-              >
-                Reset order
-              </button>
-            </div>
-          </div>
-          {showWebSourcePriority ? (
-            <>
-              <div className="web-source-priority-grid">
-                {normalizeWebSourcePriority(webSourcePriority).map((sourceId, index) => (
-                  <div key={`priority-${index}`} className="filter-field">
-                    <label htmlFor={`source-priority-${index}`}>Priority {index + 1}</label>
-                    <select
-                      id={`source-priority-${index}`}
-                      value={sourceId}
-                      onChange={(event) => updateWebSourcePriorityAt(index, event.target.value)}
-                    >
-                      {WEB_SOURCE_OPTIONS.map((option) => (
-                        <option key={option.id} value={option.id}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                ))}
-              </div>
-              <p className="muted source-priority-summary">Current order: {webSourceOrderLabel}</p>
-              <p className="muted source-priority-summary">
-                Search preferences are saved automatically and restored on next launch.
-              </p>
+                <p className="muted source-priority-summary">Current order: {webSourceOrderLabel}</p>
+                <p className="muted source-priority-summary">
+                  Search preferences are saved automatically and restored on next launch.
+                </p>
+              </section>
             </>
           ) : (
-            <p className="muted source-priority-summary">
-              Priority panel hidden. Click "Show" to view or change source order.
+            <p className="muted filter-shell-collapsed-note">
+              Filters are hidden. Click "Show filters" to update problem/date/time or web source priority.
             </p>
           )}
         </section>
@@ -1841,6 +2237,12 @@ export default function LogAnalyzer() {
               placeholder="Select or type a path..."
               value={pathSuggestionInput}
               onChange={(event) => setPathSuggestionInput(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  addPathToInput(pathSuggestionInput);
+                }
+              }}
             />
             <datalist id="saved-paths">
               {pathHistory.map((path) => (
@@ -2115,6 +2517,22 @@ export default function LogAnalyzer() {
 
       <section className="results">
         <h2>Detected Problems</h2>
+        {classificationSummary.length ? (
+          <div className="classification-summary" role="group" aria-label="Issue classification summary">
+            {classificationSummary.map((item) => (
+              <button
+                key={`classification-${item.id}`}
+                type="button"
+                className={`classification-chip ${problemType === item.id ? "is-active" : ""}`}
+                onClick={() => setProblemType(item.id)}
+                title={`${item.label} (${item.findings} findings, ${item.occurrences} occurrences)`}
+              >
+                <span>{item.label}</span>
+                <strong>{item.findings}</strong>
+              </button>
+            ))}
+          </div>
+        ) : null}
         {!visibleFindings.length ? <p>No findings yet.</p> : null}
         {visibleFindings.map((item) => {
           const key = findingFingerprint(item);
@@ -2144,6 +2562,15 @@ export default function LogAnalyzer() {
                 ) : null}
               </p>
               <p>Occurrences: {item.count}</p>
+              <p className="classification-line">
+                <strong>Classification:</strong>{" "}
+                <span className="classification-tag">{item.classificationLabel || "Unclassified runtime issue"}</span>
+                {Array.isArray(item.classificationSignals) && item.classificationSignals.length ? (
+                  <span className="classification-signals muted">
+                    Matched: {item.classificationSignals.join(", ")}
+                  </span>
+                ) : null}
+              </p>
               <p>Resolution: {item.resolution}</p>
               <div className="feedback-actions">
                 <button
