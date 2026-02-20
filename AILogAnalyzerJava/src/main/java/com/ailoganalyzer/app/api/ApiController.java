@@ -1,5 +1,7 @@
 package com.ailoganalyzer.app.api;
 
+import com.ailoganalyzer.app.agent.AgentRunService;
+import com.ailoganalyzer.app.agent.model.AgentRun;
 import com.ailoganalyzer.app.model.LogPayload;
 import com.ailoganalyzer.app.model.WebSolutionResponse;
 import com.ailoganalyzer.app.service.LogReadService;
@@ -10,9 +12,11 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.NoSuchElementException;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -25,14 +29,17 @@ public class ApiController {
   private final LogReadService logReadService;
   private final PathHistoryService pathHistoryService;
   private final WebSolutionsService webSolutionsService;
+  private final AgentRunService agentRunService;
 
   public ApiController(
       LogReadService logReadService,
       PathHistoryService pathHistoryService,
-      WebSolutionsService webSolutionsService) {
+      WebSolutionsService webSolutionsService,
+      AgentRunService agentRunService) {
     this.logReadService = logReadService;
     this.pathHistoryService = pathHistoryService;
     this.webSolutionsService = webSolutionsService;
+    this.agentRunService = agentRunService;
   }
 
   @GetMapping("/logs")
@@ -118,12 +125,95 @@ public class ApiController {
     }
   }
 
+  @PostMapping("/agent/runs")
+  public ResponseEntity<?> createAgentRun(@RequestBody(required = false) Map<String, Object> body) {
+    try {
+      Map<String, Object> payload = body == null ? Collections.emptyMap() : body;
+      String goal = payload.get("goal") == null ? "" : payload.get("goal").toString();
+      List<String> paths = toStringList(payload.get("paths"));
+      Map<String, Object> constraints = toObjectMap(payload.get("constraints"));
+      AgentRun run = agentRunService.createRun(goal, paths, constraints);
+      return ResponseEntity.ok(Map.of("run", run, "events", agentRunService.getEvents(run.getId())));
+    } catch (IllegalArgumentException ex) {
+      return badRequest(ex.getMessage());
+    } catch (Exception ex) {
+      return serverError(ex.getMessage());
+    }
+  }
+
+  @GetMapping("/agent/runs/{runId}")
+  public ResponseEntity<?> getAgentRun(@PathVariable("runId") String runId) {
+    try {
+      AgentRun run = agentRunService.getRun(runId);
+      return ResponseEntity.ok(Map.of("run", run));
+    } catch (NoSuchElementException ex) {
+      return notFound(ex.getMessage());
+    } catch (Exception ex) {
+      return serverError(ex.getMessage());
+    }
+  }
+
+  @GetMapping("/agent/runs/{runId}/events")
+  public ResponseEntity<?> getAgentRunEvents(@PathVariable("runId") String runId) {
+    try {
+      return ResponseEntity.ok(Map.of("events", agentRunService.getEvents(runId)));
+    } catch (NoSuchElementException ex) {
+      return notFound(ex.getMessage());
+    } catch (Exception ex) {
+      return serverError(ex.getMessage());
+    }
+  }
+
+  @PostMapping("/agent/runs/{runId}/steps/{stepId}/approve")
+  public ResponseEntity<?> approveAgentStep(
+      @PathVariable("runId") String runId,
+      @PathVariable("stepId") String stepId,
+      @RequestBody(required = false) Map<String, Object> body) {
+    try {
+      String note = toNote(body);
+      AgentRun run = agentRunService.approveStep(runId, stepId, note);
+      return ResponseEntity.ok(Map.of("run", run, "events", agentRunService.getEvents(run.getId())));
+    } catch (NoSuchElementException ex) {
+      return notFound(ex.getMessage());
+    } catch (IllegalArgumentException ex) {
+      return badRequest(ex.getMessage());
+    } catch (IllegalStateException ex) {
+      return badRequest(ex.getMessage());
+    } catch (Exception ex) {
+      return serverError(ex.getMessage());
+    }
+  }
+
+  @PostMapping("/agent/runs/{runId}/steps/{stepId}/reject")
+  public ResponseEntity<?> rejectAgentStep(
+      @PathVariable("runId") String runId,
+      @PathVariable("stepId") String stepId,
+      @RequestBody(required = false) Map<String, Object> body) {
+    try {
+      String note = toNote(body);
+      AgentRun run = agentRunService.rejectStep(runId, stepId, note);
+      return ResponseEntity.ok(Map.of("run", run, "events", agentRunService.getEvents(run.getId())));
+    } catch (NoSuchElementException ex) {
+      return notFound(ex.getMessage());
+    } catch (IllegalArgumentException ex) {
+      return badRequest(ex.getMessage());
+    } catch (IllegalStateException ex) {
+      return badRequest(ex.getMessage());
+    } catch (Exception ex) {
+      return serverError(ex.getMessage());
+    }
+  }
+
   private ResponseEntity<Map<String, Object>> badRequest(String message) {
     return ResponseEntity.badRequest().body(Map.of("error", safeMessage(message)));
   }
 
   private ResponseEntity<Map<String, Object>> forbidden(String message) {
     return ResponseEntity.status(403).body(Map.of("error", safeMessage(message)));
+  }
+
+  private ResponseEntity<Map<String, Object>> notFound(String message) {
+    return ResponseEntity.status(404).body(Map.of("error", safeMessage(message)));
   }
 
   private ResponseEntity<Map<String, Object>> serverError(String message) {
@@ -176,6 +266,15 @@ public class ApiController {
       return (Boolean) value;
     }
     return "true".equalsIgnoreCase(value.toString().trim());
+  }
+
+  private String toNote(Map<String, Object> body) {
+    Map<String, Object> payload = body == null ? Collections.emptyMap() : body;
+    Object note = payload.get("note");
+    if (note == null) {
+      note = payload.get("reason");
+    }
+    return note == null ? "" : note.toString();
   }
 
   private String safeMessage(Exception exception) {

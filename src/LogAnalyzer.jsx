@@ -267,6 +267,13 @@ const DEFAULT_ISSUE_CLASSIFICATION = {
 const ISSUE_CLASSIFICATION_ORDER = new Map(
   ISSUE_CLASSIFICATION_BUCKETS.map((bucket, index) => [bucket.id, index])
 );
+const AGENT_ACTIVE_STATUSES = new Set([
+  "QUEUED",
+  "PLANNING",
+  "RUNNING",
+  "AWAITING_APPROVAL",
+  "VERIFYING",
+]);
 
 function safeReadStorage(key, fallback) {
   if (typeof window === "undefined") return fallback;
@@ -281,6 +288,37 @@ function safeReadStorage(key, fallback) {
 function safeWriteStorage(key, value) {
   if (typeof window === "undefined") return;
   window.localStorage.setItem(key, JSON.stringify(value));
+}
+
+function formatRelativeTime(timestampMs) {
+  if (!timestampMs || Number.isNaN(Number(timestampMs))) return "No reads yet";
+  const diffMs = Math.max(0, Date.now() - Number(timestampMs));
+  const diffSec = Math.floor(diffMs / 1000);
+  if (diffSec < 60) return "just now";
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) return `${diffMin} minute${diffMin === 1 ? "" : "s"} ago`;
+  const diffHours = Math.floor(diffMin / 60);
+  if (diffHours < 24) return `${diffHours} hour${diffHours === 1 ? "" : "s"} ago`;
+  const diffDays = Math.floor(diffHours / 24);
+  return `${diffDays} day${diffDays === 1 ? "" : "s"} ago`;
+}
+
+async function extractApiErrorMessage(response, fallbackMessage) {
+  let message = fallbackMessage;
+  try {
+    const payload = await response.json();
+    if (typeof payload?.error === "string" && payload.error.trim()) {
+      message = payload.error.trim();
+    }
+  } catch {
+    // ignore parse errors and use fallback
+  }
+  return message;
+}
+
+function isAgentRunActive(status) {
+  const normalized = String(status || "").trim().toUpperCase();
+  return AGENT_ACTIVE_STATUSES.has(normalized);
 }
 
 function severityScore(level) {
@@ -1044,9 +1082,17 @@ export default function LogAnalyzer() {
   const [timeFrom, setTimeFrom] = useState(initialSearchPreferences.timeFrom);
   const [timeTo, setTimeTo] = useState(initialSearchPreferences.timeTo);
   const [problemType, setProblemType] = useState(initialSearchPreferences.problemType);
-  const [showTopFilters, setShowTopFilters] = useState(true);
+  const [agentMode, setAgentMode] = useState(false);
+  const [agentGoal, setAgentGoal] = useState("");
+  const [agentRun, setAgentRun] = useState(null);
+  const [agentEvents, setAgentEvents] = useState([]);
+  const [agentBusy, setAgentBusy] = useState(false);
+  const [agentError, setAgentError] = useState("");
+  const [agentDecisionBusyByStep, setAgentDecisionBusyByStep] = useState({});
+  const [showTopFilters, setShowTopFilters] = useState(false);
   const [pathSuggestionInput, setPathSuggestionInput] = useState("");
   const [showSavedPathHistory, setShowSavedPathHistory] = useState(false);
+  const [isLeftPanelVisible, setIsLeftPanelVisible] = useState(true);
   const [editingPathOriginal, setEditingPathOriginal] = useState("");
   const [editingPathValue, setEditingPathValue] = useState("");
   const [searchText, setSearchText] = useState("");
@@ -1057,6 +1103,8 @@ export default function LogAnalyzer() {
   const [autoRead, setAutoRead] = useState(initialSearchPreferences.autoRead);
   const [pollSeconds, setPollSeconds] = useState(initialSearchPreferences.pollSeconds);
   const [lastReadAt, setLastReadAt] = useState("");
+  const [lastReadTime, setLastReadTime] = useState(null);
+  const [selectedFindingKey, setSelectedFindingKey] = useState("");
   const [isProblemTypeDropdownOpen, setIsProblemTypeDropdownOpen] = useState(false);
   const [clearExclusionTargets, setClearExclusionTargets] = useState([]);
   const [showExclusionManager, setShowExclusionManager] = useState(false);
@@ -1133,9 +1181,18 @@ export default function LogAnalyzer() {
     () => pathHistory.filter((path) => !parsedPaths.some((used) => used.toLowerCase() === path.toLowerCase())),
     [pathHistory, parsedPaths]
   );
+  const envSourcePath = useMemo(() => normalizePathInput(parsedPaths[0] || pathHistory[0] || ""), [parsedPaths, pathHistory]);
+  const envLabel = useMemo(() => {
+    if (!envSourcePath) return "PREPROD";
+    return envSourcePath.slice(0, 15);
+  }, [envSourcePath]);
 
   const allEntries = useMemo(() => parseLogEntries(logs), [logs]);
   const trimmedSearchText = searchText.trim();
+  const loadedFileCount = useMemo(
+    () => new Set(allEntries.map((entry) => displaySourcePath(entry.sourcePath))).size,
+    [allEntries]
+  );
 
   const searchResults = useMemo(() => {
     if (!trimmedSearchText) return [];
@@ -1157,6 +1214,15 @@ export default function LogAnalyzer() {
         .map((id) => WEB_SOURCE_OPTIONS.find((option) => option.id === id)?.label || id)
         .join(" -> "),
     [webSourcePriority]
+  );
+  const activeAgentRunId = String(agentRun?.id || "");
+  const activeAgentSteps = useMemo(
+    () => (Array.isArray(agentRun?.steps) ? agentRun.steps : []),
+    [agentRun]
+  );
+  const recentAgentEvents = useMemo(
+    () => (Array.isArray(agentEvents) ? [...agentEvents].slice(-40).reverse() : []),
+    [agentEvents]
   );
 
   const exclusionList = useMemo(
@@ -1431,6 +1497,7 @@ export default function LogAnalyzer() {
         setUploadedFileLinks({});
         setLogs(readResult.mergedLogs);
         setLastReadAt(new Date().toLocaleString());
+        setLastReadTime(Date.now());
         setError(readResult.failures ? `Read ${readResult.successes}/${parsedPaths.length} paths.` : "");
 
         try {
@@ -1518,6 +1585,50 @@ export default function LogAnalyzer() {
       return b.occurrences - a.occurrences;
     });
   }, [findings]);
+
+  const lastReadRelativeLabel = useMemo(() => formatRelativeTime(lastReadTime), [lastReadTime]);
+
+  const findingRows = useMemo(
+    () =>
+      visibleFindings.map((item) => ({
+        key: findingFingerprint(item),
+        item,
+      })),
+    [visibleFindings]
+  );
+
+  const selectedFinding = useMemo(() => {
+    if (!findingRows.length) return null;
+    const matched = findingRows.find((entry) => entry.key === selectedFindingKey);
+    return matched ? matched.item : findingRows[0].item;
+  }, [findingRows, selectedFindingKey]);
+
+  const selectedFindingFingerprint = useMemo(
+    () => (selectedFinding ? findingFingerprint(selectedFinding) : ""),
+    [selectedFinding]
+  );
+
+  const selectedFindingReview = selectedFindingFingerprint
+    ? reviewRecords[selectedFindingFingerprint]
+    : null;
+  const selectedFindingWebData = selectedFindingFingerprint
+    ? webSolutionsByFinding[selectedFindingFingerprint]
+    : null;
+  const selectedFindingWebBusy = selectedFindingFingerprint
+    ? Boolean(webSolutionBusyByFinding[selectedFindingFingerprint])
+    : false;
+
+  useEffect(() => {
+    if (!findingRows.length) {
+      if (selectedFindingKey) {
+        setSelectedFindingKey("");
+      }
+      return;
+    }
+    if (!selectedFindingKey || !findingRows.some((entry) => entry.key === selectedFindingKey)) {
+      setSelectedFindingKey(findingRows[0].key);
+    }
+  }, [findingRows, selectedFindingKey]);
 
   useEffect(() => {
     if (problemType === "all") return;
@@ -1678,6 +1789,143 @@ export default function LogAnalyzer() {
   function resetWebSourcePriority() {
     setWebSourcePriority([...DEFAULT_WEB_SOURCE_PRIORITY]);
   }
+
+  const refreshAgentRun = useCallback(async (runId, options = {}) => {
+    const normalizedRunId = String(runId || "").trim();
+    if (!normalizedRunId) return;
+
+    const [runResponse, eventsResponse] = await Promise.all([
+      fetch(`/api/agent/runs/${encodeURIComponent(normalizedRunId)}`, { method: "GET" }),
+      fetch(`/api/agent/runs/${encodeURIComponent(normalizedRunId)}/events`, { method: "GET" }),
+    ]);
+
+    if (!runResponse.ok) {
+      throw new Error(await extractApiErrorMessage(runResponse, "Failed loading agent run."));
+    }
+    if (!eventsResponse.ok) {
+      throw new Error(await extractApiErrorMessage(eventsResponse, "Failed loading agent run events."));
+    }
+
+    const runPayload = await runResponse.json();
+    const eventsPayload = await eventsResponse.json();
+    setAgentRun(runPayload?.run || null);
+    setAgentEvents(Array.isArray(eventsPayload?.events) ? eventsPayload.events : []);
+
+    if (!options.silent) {
+      setAgentError("");
+    }
+  }, []);
+
+  async function startAgentRun() {
+    const goalValue = agentGoal.trim();
+    if (!goalValue) {
+      setAgentError("Enter an agent goal before starting a run.");
+      return;
+    }
+
+    setAgentBusy(true);
+    setAgentError("");
+    try {
+      const response = await fetch("/api/agent/runs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          goal: goalValue,
+          paths: parsedPaths,
+          constraints: {
+            allow_start: false,
+            allow_deploy: false,
+            allow_destructive_actions: false,
+            requested_mode: "supervised_preview",
+          },
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(await extractApiErrorMessage(response, "Failed starting agent run."));
+      }
+      const payload = await response.json();
+      setAgentRun(payload?.run || null);
+      setAgentEvents(Array.isArray(payload?.events) ? payload.events : []);
+      setAgentDecisionBusyByStep({});
+    } catch (e) {
+      setAgentError(e instanceof Error ? e.message : "Failed starting agent run.");
+    } finally {
+      setAgentBusy(false);
+    }
+  }
+
+  async function refreshActiveAgentRun() {
+    if (!activeAgentRunId) return;
+    setAgentBusy(true);
+    try {
+      await refreshAgentRun(activeAgentRunId, { silent: false });
+    } catch (e) {
+      setAgentError(e instanceof Error ? e.message : "Failed refreshing agent run.");
+    } finally {
+      setAgentBusy(false);
+    }
+  }
+
+  async function submitAgentDecision(stepId, action) {
+    const normalizedStepId = String(stepId || "").trim();
+    if (!activeAgentRunId || !normalizedStepId) return;
+    if (!["approve", "reject"].includes(action)) return;
+
+    setAgentDecisionBusyByStep((prev) => ({ ...prev, [normalizedStepId]: true }));
+    setAgentError("");
+    try {
+      const response = await fetch(
+        `/api/agent/runs/${encodeURIComponent(activeAgentRunId)}/steps/${encodeURIComponent(
+          normalizedStepId
+        )}/${action}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            note:
+              action === "approve"
+                ? "Approved by user in supervised preview mode."
+                : "Rejected by user in supervised preview mode.",
+          }),
+        }
+      );
+      if (!response.ok) {
+        throw new Error(await extractApiErrorMessage(response, "Failed submitting decision."));
+      }
+      const payload = await response.json();
+      setAgentRun(payload?.run || null);
+      setAgentEvents(Array.isArray(payload?.events) ? payload.events : []);
+    } catch (e) {
+      setAgentError(e instanceof Error ? e.message : "Failed submitting decision.");
+    } finally {
+      setAgentDecisionBusyByStep((prev) => ({ ...prev, [normalizedStepId]: false }));
+    }
+  }
+
+  useEffect(() => {
+    if (!activeAgentRunId) return;
+    if (!isAgentRunActive(agentRun?.status)) return;
+
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        await refreshAgentRun(activeAgentRunId, { silent: true });
+      } catch (e) {
+        if (cancelled) return;
+        setAgentError(e instanceof Error ? e.message : "Failed refreshing active agent run.");
+      }
+    };
+
+    void tick();
+    const timer = setInterval(() => {
+      void tick();
+    }, 3000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [activeAgentRunId, agentRun?.status, refreshAgentRun]);
 
   async function findWebSolutionsForFinding(item) {
     const key = findingFingerprint(item);
@@ -1878,6 +2126,7 @@ export default function LogAnalyzer() {
         setUploadedFileLinks({});
         setLogs(readResult.mergedLogs);
         setLastReadAt(new Date().toLocaleString());
+        setLastReadTime(Date.now());
         setError(readResult.failures ? `Read ${readResult.successes}/${parsedPaths.length} paths.` : "");
         await analyzeLogs(readResult.mergedLogs, true);
         return;
@@ -1931,22 +2180,124 @@ export default function LogAnalyzer() {
     });
   }
 
+  function exportCurrentLogs() {
+    const content = String(logs || "");
+    if (!content.trim()) {
+      setError("No logs available to export.");
+      return;
+    }
+    try {
+      const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `ai-log-analyzer-${stamp}.log`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    } catch {
+      setError("Export failed.");
+    }
+  }
+
+  async function createJiraDraft() {
+    const target = selectedFinding;
+    const title = target ? target.title : "Log issue from AI Log Analyzer";
+    const description = target
+      ? [
+          `Severity: ${target.severity}`,
+          `Occurrences: ${target.count}`,
+          `Source: ${displaySourcePath(target.sourcePath)}`,
+          `Classification: ${target.classificationLabel || target.categoryLabel}`,
+          "",
+          `Resolution Hint: ${target.resolution}`,
+          "",
+          "Evidence:",
+          ...(target.evidence || []).slice(0, 8),
+        ].join("\n")
+      : "No specific finding selected.";
+
+    const draft = `Jira Summary: ${title}\n\n${description}`;
+    try {
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(draft);
+        window.alert("Jira draft copied to clipboard. Paste it into Jira.");
+        return;
+      }
+    } catch {
+      // fallback to alert below
+    }
+    window.alert(`Jira draft prepared:\n\n${draft}`);
+  }
+
   return (
     <main className="log-analyzer">
       <section className="hero">
-        <h1>AI Log Problem Analyzer</h1>
+        <div className="hero-title-row">
+          <h1>AI Log Analyzer</h1>
+          <span className="env-pill" title={envSourcePath || "No path configured"}>
+            {envLabel}
+          </span>
+        </div>
         <p>Read up to 30 files, detect problems, and learn from your feedback.</p>
       </section>
 
-      <section className="card">
+      <section className="command-bar">
+        <button
+          type="button"
+          className="action-button action-ghost"
+          onClick={() => setIsLeftPanelVisible((prev) => !prev)}
+          aria-expanded={isLeftPanelVisible}
+          aria-controls="sources-panel"
+        >
+          {isLeftPanelVisible ? "Hide left panel" : "Show left panel"}
+        </button>
+        <button type="button" className="action-button action-primary" disabled={busy} onClick={onAnalyze}>
+          {busy ? "Analyzing..." : "Analyze"}
+        </button>
+        <button type="button" className="action-button action-ghost" onClick={() => void createJiraDraft()}>
+          Create Jira
+        </button>
+        <button type="button" className="action-button action-ghost" onClick={exportCurrentLogs}>
+          Export
+        </button>
+        <button
+          type="button"
+          className="action-button action-ghost command-refresh"
+          onClick={() => {
+            if (activeAgentRunId) {
+              void refreshActiveAgentRun();
+              return;
+            }
+            void onAnalyze();
+          }}
+          title="Refresh"
+        >
+          Refresh
+        </button>
+      </section>
+
+      <section className={`workspace-grid ${isLeftPanelVisible ? "" : "is-left-hidden"}`}>
+        {isLeftPanelVisible ? (
+          <section id="sources-panel" className="card">
         <div className="stats-row">
           <article className="stat-card">
             <span>Detected problems</span>
             <strong>{findings.length}</strong>
           </article>
           <article className="stat-card">
+            <span>Files</span>
+            <strong>{loadedFileCount}</strong>
+          </article>
+          <article className="stat-card">
             <span>Configured paths</span>
             <strong>{parsedPaths.length}</strong>
+          </article>
+          <article className="stat-card">
+            <span>Last run</span>
+            <strong>{lastReadRelativeLabel}</strong>
           </article>
           <button
             type="button"
@@ -1958,147 +2309,139 @@ export default function LogAnalyzer() {
           </button>
         </div>
 
-        <section className="filters-shell">
-          <div className={`filter-toggle-row ${showTopFilters ? "is-open" : ""}`}>
-            <small>Filters And Priority</small>
+        <section className="agent-console-panel">
+          <div className="agent-console-header">
+            <div>
+              <h3>Agent Console (Supervised Preview)</h3>
+              <p className="muted">
+                Read-only diagnostics with approval gates. Start/deploy/destructive actions are blocked.
+              </p>
+            </div>
             <button
               type="button"
-              className="action-button action-ghost"
-              onClick={toggleTopFilters}
-              aria-expanded={showTopFilters}
+              className={`action-button action-toggle ${agentMode ? "is-active" : ""}`}
+              onClick={() => setAgentMode((prev) => !prev)}
             >
-              {showTopFilters ? "Hide filters" : "Show filters"}
+              {agentMode ? "Agent mode: On" : "Agent mode: Off"}
             </button>
           </div>
-          {showTopFilters ? (
+
+          {agentMode ? (
             <>
-              <div className="filters top-filters">
-                <div className="filter-field">
-                  <label htmlFor="problem-type">Problem type</label>
-                  <div className="single-select-dropdown" ref={problemTypeDropdownRef}>
-                    <button
-                      id="problem-type"
-                      type="button"
-                      className={`single-select-trigger ${isProblemTypeDropdownOpen ? "is-open" : ""}`}
-                      onClick={() => setIsProblemTypeDropdownOpen((prev) => !prev)}
-                      aria-expanded={isProblemTypeDropdownOpen}
-                      aria-controls="problem-type-menu"
-                    >
-                      <span className="single-select-trigger-text">{problemTypeLabel}</span>
-                    </button>
-                    {isProblemTypeDropdownOpen ? (
-                      <div id="problem-type-menu" className="single-select-menu" role="listbox">
-                        <button
-                          type="button"
-                          className={`single-select-option ${problemType === "all" ? "is-selected" : ""}`}
-                          onClick={() => {
-                            setProblemType("all");
-                            setIsProblemTypeDropdownOpen(false);
-                          }}
-                        >
-                          <span>All problems</span>
-                        </button>
-                        {problemTypeOptions.map((item) => (
-                          <button
-                            key={item.id}
-                            type="button"
-                            className={`single-select-option ${
-                              problemType === item.id ? "is-selected" : ""
-                            }`}
-                            onClick={() => {
-                              setProblemType(item.id);
-                              setIsProblemTypeDropdownOpen(false);
-                            }}
-                            title={item.title}
-                          >
-                            <span>{item.title}</span>
-                          </button>
-                        ))}
-                      </div>
-                    ) : null}
-                  </div>
-                </div>
-                <div className="filter-field">
-                  <label htmlFor="date-from">Date from</label>
+              <div className="agent-console-controls">
+                <div className="filter-field agent-goal-field">
+                  <label htmlFor="agent-goal">Agent goal</label>
                   <input
-                    id="date-from"
-                    type="date"
-                    value={dateFrom}
-                    onChange={(event) => setDateFrom(event.target.value)}
+                    id="agent-goal"
+                    type="text"
+                    placeholder="Example: Reduce checkout 500 errors in 15 minutes."
+                    value={agentGoal}
+                    onChange={(event) => setAgentGoal(event.target.value)}
                   />
                 </div>
-                <div className="filter-field">
-                  <label htmlFor="date-to">Date to</label>
-                  <input
-                    id="date-to"
-                    type="date"
-                    value={dateTo}
-                    onChange={(event) => setDateTo(event.target.value)}
-                  />
-                </div>
-                <div className="filter-field">
-                  <label htmlFor="time-from">Time from</label>
-                  <input
-                    id="time-from"
-                    type="time"
-                    value={timeFrom}
-                    onChange={(event) => setTimeFrom(event.target.value)}
-                  />
-                </div>
-                <div className="filter-field">
-                  <label htmlFor="time-to">Time to</label>
-                  <input
-                    id="time-to"
-                    type="time"
-                    value={timeTo}
-                    onChange={(event) => setTimeTo(event.target.value)}
-                  />
+                <div className="agent-console-actions">
+                  <button
+                    type="button"
+                    className="action-button action-primary"
+                    onClick={startAgentRun}
+                    disabled={agentBusy || !agentGoal.trim()}
+                  >
+                    {agentBusy ? "Starting..." : "Start agent run"}
+                  </button>
+                  <button
+                    type="button"
+                    className="action-button action-ghost"
+                    onClick={refreshActiveAgentRun}
+                    disabled={agentBusy || !activeAgentRunId}
+                  >
+                    Refresh
+                  </button>
                 </div>
               </div>
 
-              <section className="web-source-priority-panel">
-                <div className="web-source-priority-header">
-                  <div>
-                    <h3>Web Resolution Source Priority</h3>
-                    <p className="muted">Applied live when you click "Find Web Solutions".</p>
+              <p className="muted agent-console-paths">
+                Planned paths: {parsedPaths.length ? `${parsedPaths.length} selected` : "none selected"}.
+              </p>
+              {agentError ? <p className="error">{agentError}</p> : null}
+
+              {agentRun ? (
+                <section className="agent-run-surface">
+                  <p className="agent-run-meta">
+                    <strong>Run:</strong>
+                    <code>{agentRun.id}</code>
+                    <span className="classification-tag">{agentRun.status || "UNKNOWN"}</span>
+                  </p>
+                  {agentRun.summary ? <p className="agent-run-summary">{agentRun.summary}</p> : null}
+                  <p className="muted agent-run-summary">Confidence: {agentRun.confidence ?? "n/a"}</p>
+
+                  <div className="agent-grid">
+                    <section className="agent-steps">
+                      <h4>Plan Steps</h4>
+                      {!activeAgentSteps.length ? <p className="muted">No plan steps available.</p> : null}
+                      {activeAgentSteps.map((step) => {
+                        const waitingApproval = step.status === "AWAITING_APPROVAL";
+                        const decisionBusy = Boolean(agentDecisionBusyByStep[step.id]);
+                        return (
+                          <article key={step.id} className="agent-step-card">
+                            <header>
+                              <h5>{step.title || "Untitled step"}</h5>
+                              <span className="classification-tag">{step.status || "PENDING"}</span>
+                            </header>
+                            <p className="muted">
+                              Tool: {step.toolName || "unknown"} | Risk: {step.riskLevel || "SAFE"}
+                            </p>
+                            {step.summary ? <p>{step.summary}</p> : null}
+                            {step.error ? <p className="error">{step.error}</p> : null}
+                            {waitingApproval ? (
+                              <div className="agent-step-actions">
+                                <button
+                                  type="button"
+                                  className="action-button action-accent"
+                                  onClick={() => submitAgentDecision(step.id, "approve")}
+                                  disabled={decisionBusy}
+                                >
+                                  {decisionBusy ? "Submitting..." : "Approve"}
+                                </button>
+                                <button
+                                  type="button"
+                                  className="action-button action-danger"
+                                  onClick={() => submitAgentDecision(step.id, "reject")}
+                                  disabled={decisionBusy}
+                                >
+                                  {decisionBusy ? "Submitting..." : "Reject"}
+                                </button>
+                              </div>
+                            ) : null}
+                          </article>
+                        );
+                      })}
+                    </section>
+
+                    <section className="agent-events">
+                      <h4>Timeline</h4>
+                      {!recentAgentEvents.length ? <p className="muted">No timeline events yet.</p> : null}
+                      {recentAgentEvents.length ? (
+                        <div className="agent-event-list">
+                          {recentAgentEvents.map((event) => (
+                            <article key={event.id} className="agent-event-item">
+                              <p>
+                                <strong>{event.type || "EVENT"}</strong>: {event.message || "No details"}
+                              </p>
+                              <small className="muted">
+                                {event.timestamp ? new Date(event.timestamp).toLocaleString() : "time unavailable"}
+                              </small>
+                            </article>
+                          ))}
+                        </div>
+                      ) : null}
+                    </section>
                   </div>
-                  <div className="web-source-priority-actions">
-                    <button
-                      type="button"
-                      className="action-button action-ghost"
-                      onClick={resetWebSourcePriority}
-                    >
-                      Reset order
-                    </button>
-                  </div>
-                </div>
-                <div className="web-source-priority-grid">
-                  {normalizeWebSourcePriority(webSourcePriority).map((sourceId, index) => (
-                    <div key={`priority-${index}`} className="filter-field">
-                      <label htmlFor={`source-priority-${index}`}>Priority {index + 1}</label>
-                      <select
-                        id={`source-priority-${index}`}
-                        value={sourceId}
-                        onChange={(event) => updateWebSourcePriorityAt(index, event.target.value)}
-                      >
-                        {WEB_SOURCE_OPTIONS.map((option) => (
-                          <option key={option.id} value={option.id}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  ))}
-                </div>
-                <p className="muted source-priority-summary">Current order: {webSourceOrderLabel}</p>
-                <p className="muted source-priority-summary">
-                  Search preferences are saved automatically and restored on next launch.
-                </p>
-              </section>
+                </section>
+              ) : null}
             </>
           ) : (
-            <p className="muted filter-shell-collapsed-note">
-              Filters are hidden. Click "Show filters" to update problem/date/time or web source priority.
+            <p className="muted agent-console-collapsed-note">
+              Enable Agent mode to run a supervised plan-execute-verify workflow with user approvals.
             </p>
           )}
         </section>
@@ -2438,6 +2781,156 @@ export default function LogAnalyzer() {
           ) : null}
         </div>
 
+        {error ? <p className="error">{error}</p> : null}
+          </section>
+        ) : null}
+
+        <section className="results">
+        <section className="filters-shell">
+          <div className={`filter-toggle-row ${showTopFilters ? "is-open" : ""}`}>
+            <small>Filters And Priority</small>
+            <button
+              type="button"
+              className="action-button action-ghost"
+              onClick={toggleTopFilters}
+              aria-expanded={showTopFilters}
+            >
+              {showTopFilters ? "Hide filters" : "Show filters"}
+            </button>
+          </div>
+          {showTopFilters ? (
+            <>
+              <div className="filters top-filters">
+                <div className="filter-field">
+                  <label htmlFor="problem-type">Problem type</label>
+                  <div className="single-select-dropdown" ref={problemTypeDropdownRef}>
+                    <button
+                      id="problem-type"
+                      type="button"
+                      className={`single-select-trigger ${isProblemTypeDropdownOpen ? "is-open" : ""}`}
+                      onClick={() => setIsProblemTypeDropdownOpen((prev) => !prev)}
+                      aria-expanded={isProblemTypeDropdownOpen}
+                      aria-controls="problem-type-menu"
+                    >
+                      <span className="single-select-trigger-text">{problemTypeLabel}</span>
+                    </button>
+                    {isProblemTypeDropdownOpen ? (
+                      <div id="problem-type-menu" className="single-select-menu" role="listbox">
+                        <button
+                          type="button"
+                          className={`single-select-option ${problemType === "all" ? "is-selected" : ""}`}
+                          onClick={() => {
+                            setProblemType("all");
+                            setIsProblemTypeDropdownOpen(false);
+                          }}
+                        >
+                          <span>All problems</span>
+                        </button>
+                        {problemTypeOptions.map((item) => (
+                          <button
+                            key={item.id}
+                            type="button"
+                            className={`single-select-option ${
+                              problemType === item.id ? "is-selected" : ""
+                            }`}
+                            onClick={() => {
+                              setProblemType(item.id);
+                              setIsProblemTypeDropdownOpen(false);
+                            }}
+                            title={item.title}
+                          >
+                            <span>{item.title}</span>
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+                <div className="filter-field">
+                  <label htmlFor="date-from">Date from</label>
+                  <input
+                    id="date-from"
+                    type="date"
+                    value={dateFrom}
+                    onChange={(event) => setDateFrom(event.target.value)}
+                  />
+                </div>
+                <div className="filter-field">
+                  <label htmlFor="date-to">Date to</label>
+                  <input
+                    id="date-to"
+                    type="date"
+                    value={dateTo}
+                    onChange={(event) => setDateTo(event.target.value)}
+                  />
+                </div>
+                <div className="filter-field">
+                  <label htmlFor="time-from">Time from</label>
+                  <input
+                    id="time-from"
+                    type="time"
+                    value={timeFrom}
+                    onChange={(event) => setTimeFrom(event.target.value)}
+                  />
+                </div>
+                <div className="filter-field">
+                  <label htmlFor="time-to">Time to</label>
+                  <input
+                    id="time-to"
+                    type="time"
+                    value={timeTo}
+                    onChange={(event) => setTimeTo(event.target.value)}
+                  />
+                </div>
+              </div>
+
+              <section className="web-source-priority-panel">
+                <div className="web-source-priority-header">
+                  <div>
+                    <h3>Web Resolution Source Priority</h3>
+                    <p className="muted">Applied live when you click "Find Web Solutions".</p>
+                  </div>
+                  <div className="web-source-priority-actions">
+                    <button
+                      type="button"
+                      className="action-button action-ghost"
+                      onClick={resetWebSourcePriority}
+                    >
+                      Reset order
+                    </button>
+                  </div>
+                </div>
+                <div className="web-source-priority-grid">
+                  {normalizeWebSourcePriority(webSourcePriority).map((sourceId, index) => (
+                    <div key={`priority-${index}`} className="filter-field">
+                      <label htmlFor={`source-priority-${index}`}>Priority {index + 1}</label>
+                      <select
+                        id={`source-priority-${index}`}
+                        value={sourceId}
+                        onChange={(event) => updateWebSourcePriorityAt(index, event.target.value)}
+                      >
+                        {WEB_SOURCE_OPTIONS.map((option) => (
+                          <option key={option.id} value={option.id}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  ))}
+                </div>
+                <p className="muted source-priority-summary">Current order: {webSourceOrderLabel}</p>
+                <p className="muted source-priority-summary">
+                  Search preferences are saved automatically and restored on next launch.
+                </p>
+              </section>
+            </>
+          ) : (
+            <p className="muted filter-shell-collapsed-note">
+              Filters are hidden. Click "Show filters" to update problem/date/time or web source priority.
+            </p>
+          )}
+        </section>
+
         <section className="search-panel">
           <div className="search-row">
             <div className="filter-field search-input">
@@ -2512,11 +3005,12 @@ export default function LogAnalyzer() {
           ) : null}
         </section>
 
-        {error ? <p className="error">{error}</p> : null}
-      </section>
-
-      <section className="results">
-        <h2>Detected Problems</h2>
+        <div className="results-topline">
+          <h2>Detected Problems</h2>
+          <small className="muted">
+            Showing {visibleFindings.length} of {findings.length} findings
+          </small>
+        </div>
         {classificationSummary.length ? (
           <div className="classification-summary" role="group" aria-label="Issue classification summary">
             {classificationSummary.map((item) => (
@@ -2533,118 +3027,158 @@ export default function LogAnalyzer() {
             ))}
           </div>
         ) : null}
-        {!visibleFindings.length ? <p>No findings yet.</p> : null}
-        {visibleFindings.map((item) => {
-          const key = findingFingerprint(item);
-          const review = reviewRecords[key];
-          const webData = webSolutionsByFinding[key];
-          const webBusy = Boolean(webSolutionBusyByFinding[key]);
-          return (
-            <article key={key} className="result-card">
-              <header>
-                <h3>{item.title}</h3>
-                <span className={`severity severity-${item.severity}`}>{item.severity}</span>
-              </header>
-              <p className="source-path">
-                <span className="source-name">{item.sourceName || "unknown"}</span>
-                <code title={displaySourcePath(item.sourcePath)}>
-                  {displayCompactPath(item.sourcePath)}
-                </code>
-                {buildLogViewUrl(item.sourcePath, uploadedFileLinks) ? (
-                  <a
-                    className="log-link"
-                    href={buildLogViewUrl(item.sourcePath, uploadedFileLinks)}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    Open log
-                  </a>
-                ) : null}
-              </p>
-              <p>Occurrences: {item.count}</p>
-              <p className="classification-line">
-                <strong>Classification:</strong>{" "}
-                <span className="classification-tag">{item.classificationLabel || "Unclassified runtime issue"}</span>
-                {Array.isArray(item.classificationSignals) && item.classificationSignals.length ? (
-                  <span className="classification-signals muted">
-                    Matched: {item.classificationSignals.join(", ")}
-                  </span>
-                ) : null}
-              </p>
-              <p>Resolution: {item.resolution}</p>
-              <div className="feedback-actions">
-                <button
-                  type="button"
-                  className="action-button action-accent"
-                  disabled={webBusy}
-                  onClick={() => findWebSolutionsForFinding(item)}
-                >
-                  {webBusy ? "Searching Web..." : "Find Web Solutions"}
-                </button>
-                <button
-                  type="button"
-                  className="action-button action-ghost"
-                  onClick={() => markAsProblem(item)}
-                >
-                  Mark Problem
-                </button>
-                <button
-                  type="button"
-                  className="action-button action-ghost"
-                  onClick={() => markAsNotProblem(item)}
-                >
-                  Mark Not Problem
-                </button>
-                {review ? <small className="muted">Marked: {review.status}</small> : null}
+
+        <div className="findings-workspace">
+          <section className="findings-list-panel">
+            <header className="findings-list-header">
+              <span>Problem</span>
+              <span>Type</span>
+              <span>File</span>
+              <span>Occurrences</span>
+            </header>
+            {!findingRows.length ? <p className="muted">No findings yet.</p> : null}
+            {findingRows.length ? (
+              <div className="findings-row-list">
+                {findingRows.map((entry) => {
+                  const item = entry.item;
+                  return (
+                    <button
+                      key={entry.key}
+                      type="button"
+                      className={`finding-row ${selectedFindingKey === entry.key ? "is-selected" : ""}`}
+                      onClick={() => setSelectedFindingKey(entry.key)}
+                    >
+                      <div className="finding-row-problem">
+                        <span className={`severity-pill severity-${item.severity}`}>{item.severity}</span>
+                        <strong>{item.title}</strong>
+                      </div>
+                      <span className="finding-row-type">
+                        {item.classificationLabel || item.categoryLabel || "Unknown"}
+                      </span>
+                      <span className="finding-row-file">{item.sourceName || "unknown"}</span>
+                      <span className="finding-row-count">{item.count}</span>
+                    </button>
+                  );
+                })}
               </div>
-              {webData ? (
-                <div className="web-solution-panel">
-                  <p className="web-query">
-                    <strong>Web query:</strong> {webData.query || item.title}
-                  </p>
-                  {webData.warning ? <p className="muted">{webData.warning}</p> : null}
-                  {Array.isArray(webData.solutions) && webData.solutions.length ? (
-                    <div className="web-solution-list">
-                      {webData.solutions.map((solution, index) => (
-                        <article
-                          key={`${key}-web-${index}`}
-                          className="web-solution-item"
+            ) : null}
+          </section>
+
+          <section className="finding-detail-panel">
+            {!selectedFinding ? <p className="muted">Select a finding to inspect details.</p> : null}
+            {selectedFinding ? (
+              <>
+                <header className="finding-detail-header">
+                  <div>
+                    <h3>{selectedFinding.title}</h3>
+                    <p className="source-path">
+                      <span className="source-name">{selectedFinding.sourceName || "unknown"}</span>
+                      <code title={displaySourcePath(selectedFinding.sourcePath)}>
+                        {displayCompactPath(selectedFinding.sourcePath)}
+                      </code>
+                      {buildLogViewUrl(selectedFinding.sourcePath, uploadedFileLinks) ? (
+                        <a
+                          className="log-link"
+                          href={buildLogViewUrl(selectedFinding.sourcePath, uploadedFileLinks)}
+                          target="_blank"
+                          rel="noreferrer"
                         >
-                          <p className="web-solution-title">
-                            <strong>{solution.title || `Solution ${index + 1}`}</strong>
-                          </p>
-                          <p className="web-solution-source">
-                            <strong>Source:</strong> {solution.source || "Web"}
-                          </p>
-                          <p className="web-solution-text">{solution.solution}</p>
-                          {solution.url ? (
-                            <a
-                              className="log-link"
-                              href={solution.url}
-                              target="_blank"
-                              rel="noreferrer"
-                            >
-                              View source
-                            </a>
-                          ) : null}
-                        </article>
-                      ))}
-                    </div>
-                  ) : (
-                    <p className="muted">No web solutions available for this issue yet.</p>
-                  )}
+                          Open file
+                        </a>
+                      ) : null}
+                    </p>
+                  </div>
+                  <span className={`severity severity-${selectedFinding.severity}`}>{selectedFinding.severity}</span>
+                </header>
+
+                <p>Occurrences: {selectedFinding.count}</p>
+                <p className="classification-line">
+                  <strong>Classification:</strong>{" "}
+                  <span className="classification-tag">
+                    {selectedFinding.classificationLabel || "Unclassified runtime issue"}
+                  </span>
+                  {Array.isArray(selectedFinding.classificationSignals) &&
+                  selectedFinding.classificationSignals.length ? (
+                    <span className="classification-signals muted">
+                      Matched: {selectedFinding.classificationSignals.join(", ")}
+                    </span>
+                  ) : null}
+                </p>
+                <p>Resolution: {selectedFinding.resolution}</p>
+
+                <div className="feedback-actions">
+                  <button
+                    type="button"
+                    className="action-button action-accent"
+                    disabled={selectedFindingWebBusy}
+                    onClick={() => findWebSolutionsForFinding(selectedFinding)}
+                  >
+                    {selectedFindingWebBusy ? "Searching Web..." : "Find Web Solutions"}
+                  </button>
+                  <button
+                    type="button"
+                    className="action-button action-ghost"
+                    onClick={() => markAsNotProblem(selectedFinding)}
+                  >
+                    Mark as /Not Problem
+                  </button>
+                  <button
+                    type="button"
+                    className="action-button action-ghost"
+                    onClick={() => markAsProblem(selectedFinding)}
+                  >
+                    Mark as Problem
+                  </button>
+                  {selectedFindingReview ? (
+                    <small className="muted">Marked: {selectedFindingReview.status}</small>
+                  ) : null}
                 </div>
-              ) : null}
-              <div className="evidence-list">
-                {item.evidence.map((line, index) => (
-                  <p key={`${key}-${index}`} className="evidence-line">
-                    {line}
-                  </p>
-                ))}
-              </div>
-            </article>
-          );
-        })}
+
+                {selectedFindingWebData ? (
+                  <div className="web-solution-panel">
+                    <p className="web-query">
+                      <strong>Web query:</strong> {selectedFindingWebData.query || selectedFinding.title}
+                    </p>
+                    {selectedFindingWebData.warning ? (
+                      <p className="muted">{selectedFindingWebData.warning}</p>
+                    ) : null}
+                    {Array.isArray(selectedFindingWebData.solutions) && selectedFindingWebData.solutions.length ? (
+                      <div className="web-solution-list">
+                        {selectedFindingWebData.solutions.map((solution, index) => (
+                          <article key={`${selectedFindingFingerprint}-web-${index}`} className="web-solution-item">
+                            <p className="web-solution-title">
+                              <strong>{solution.title || `Solution ${index + 1}`}</strong>
+                            </p>
+                            <p className="web-solution-source">
+                              <strong>Source:</strong> {solution.source || "Web"}
+                            </p>
+                            <p className="web-solution-text">{solution.solution}</p>
+                            {solution.url ? (
+                              <a className="log-link" href={solution.url} target="_blank" rel="noreferrer">
+                                View source
+                              </a>
+                            ) : null}
+                          </article>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="muted">No web solutions available for this issue yet.</p>
+                    )}
+                  </div>
+                ) : null}
+
+                <div className="evidence-list">
+                  {(selectedFinding.evidence || []).map((line, index) => (
+                    <p key={`${selectedFindingFingerprint}-${index}`} className="evidence-line">
+                      {line}
+                    </p>
+                  ))}
+                </div>
+              </>
+            ) : null}
+          </section>
+        </div>
+        </section>
       </section>
 
       {aiResult ? (
