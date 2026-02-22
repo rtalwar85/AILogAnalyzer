@@ -175,6 +175,46 @@
   margin: 0;
 }
 
+.agent-action-mode-panel {
+  margin-top: 0.7rem;
+  border: 1px solid #d4e4ff;
+  border-radius: 11px;
+  background: #ffffff;
+  padding: 0.6rem;
+}
+
+.agent-action-mode-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+
+.agent-action-permissions {
+  margin-top: 0.45rem;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+.agent-action-controls {
+  margin-top: 0.55rem;
+  display: grid;
+  gap: 0.45rem;
+}
+
+.agent-confirmation-field {
+  max-width: 460px;
+}
+
+.agent-action-buttons {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
 .agent-run-surface {
   margin-top: 0.6rem;
   border: 1px solid #dbe8ff;
@@ -238,6 +278,51 @@
 
 .agent-step-card p {
   margin: 0.35rem 0 0;
+}
+
+.agent-step-details {
+  margin-top: 0.45rem;
+  padding-top: 0.45rem;
+  border-top: 1px dashed #d7e5ff;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.agent-step-details p {
+  margin: 0;
+  font-size: 0.84rem;
+  color: #1f3d66;
+  line-height: 1.38;
+}
+
+.agent-step-options {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.agent-step-option {
+  border: 1px solid #d7e4fb;
+  border-radius: 10px;
+  background: #ffffff;
+  padding: 0.45rem 0.5rem;
+}
+
+.agent-step-option-title {
+  margin: 0;
+}
+
+.agent-step-list {
+  margin: 0.25rem 0 0;
+  padding-left: 1rem;
+  display: grid;
+  gap: 0.2rem;
+  font-size: 0.82rem;
+  color: #25446f;
+}
+
+.agent-executed-actions {
+  border-top: 1px dashed #d7e5ff;
+  padding-top: 0.35rem;
 }
 
 .agent-step-actions {

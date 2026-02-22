@@ -274,6 +274,17 @@ const AGENT_ACTIVE_STATUSES = new Set([
   "AWAITING_APPROVAL",
   "VERIFYING",
 ]);
+const DEFAULT_AGENT_CAPABILITIES = {
+  privilegedActionsEnabled: false,
+  confirmationPhrase: "",
+  timeoutSeconds: 0,
+  actions: {
+    restart_server: false,
+    deploy: false,
+    code_change: false,
+  },
+  policyNotice: "Privileged action mode is disabled in backend configuration.",
+};
 
 function safeReadStorage(key, fallback) {
   if (typeof window === "undefined") return fallback;
@@ -319,6 +330,106 @@ async function extractApiErrorMessage(response, fallbackMessage) {
 function isAgentRunActive(status) {
   const normalized = String(status || "").trim().toUpperCase();
   return AGENT_ACTIVE_STATUSES.has(normalized);
+}
+
+function normalizeAgentStringList(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => String(item || "").trim())
+    .filter(Boolean);
+}
+
+function normalizeAgentObjectList(value) {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item) => item && typeof item === "object");
+}
+
+function buildAgentStepDetailModel(step) {
+  if (!step || !step.output || typeof step.output !== "object") return null;
+  const output = step.output;
+  const primaryCategory = String(output.primaryCategory || "").trim();
+  const targetHost = String(output.targetHost || "").trim();
+  const evidenceSummary = String(output.evidenceSummary || "").trim();
+  const note = String(output.note || "").trim();
+  const decision = String(output.decision || "").trim();
+  const decisionNote = String(output.decisionNote || output.note || "").trim();
+  const approvalChecklist = normalizeAgentStringList(output.approvalChecklist);
+  const blockedActions = normalizeAgentStringList(output.blockedActions);
+  const unreadablePathHints = normalizeAgentStringList(output.unreadablePathHints);
+  const executedActions = normalizeAgentObjectList(output.executedActions).map((action, index) => {
+    const actionType = String(action.actionType || "").trim() || `action_${index + 1}`;
+    return {
+      key: `${actionType}-${index}`,
+      actionLabel: String(action.actionLabel || actionType).trim(),
+      success: Boolean(action.success),
+      note: String(action.note || "").trim(),
+      timestamp: String(action.timestamp || "").trim(),
+      outputSnippet: String(action.outputSnippet || "").trim(),
+      error: String(action.error || "").trim(),
+      exitCode: Number.isFinite(Number(action.exitCode)) ? Number(action.exitCode) : null,
+    };
+  });
+  const options = normalizeAgentObjectList(output.options).map((option, index) => {
+    const title = String(option.title || "").trim() || `Option ${index + 1}`;
+    return {
+      key: String(option.id || "").trim() || `${title}-${index}`,
+      title,
+      risk: String(option.risk || "").trim() || "SAFE",
+      why: String(option.why || "").trim(),
+      rollback: String(option.rollback || "").trim(),
+      requiresApproval: Boolean(option.requiresApproval),
+      actions: normalizeAgentStringList(option.actions),
+      successSignals: normalizeAgentStringList(option.successSignals),
+    };
+  });
+  const hasDetail =
+    Boolean(primaryCategory) ||
+    Boolean(targetHost) ||
+    Boolean(evidenceSummary) ||
+    Boolean(note) ||
+    Boolean(decision) ||
+    options.length > 0 ||
+    approvalChecklist.length > 0 ||
+    blockedActions.length > 0 ||
+    unreadablePathHints.length > 0 ||
+    executedActions.length > 0;
+  if (!hasDetail) return null;
+  return {
+    primaryCategory,
+    targetHost,
+    evidenceSummary,
+    note,
+    decision,
+    decisionNote,
+    approvalChecklist,
+    blockedActions,
+    unreadablePathHints,
+    executedActions,
+    options,
+  };
+}
+
+function normalizeAgentCapabilities(payload) {
+  const actionsPayload = payload && typeof payload === "object" && payload.actions ? payload.actions : {};
+  return {
+    privilegedActionsEnabled: Boolean(payload?.privilegedActionsEnabled),
+    confirmationPhrase: String(payload?.confirmationPhrase || ""),
+    timeoutSeconds: Number(payload?.timeoutSeconds || 0),
+    actions: {
+      restart_server: Boolean(actionsPayload?.restart_server),
+      deploy: Boolean(actionsPayload?.deploy),
+      code_change: Boolean(actionsPayload?.code_change),
+    },
+    policyNotice: String(payload?.policyNotice || DEFAULT_AGENT_CAPABILITIES.policyNotice),
+  };
+}
+
+function normalizeBooleanFlag(value) {
+  if (typeof value === "boolean") return value;
+  const normalized = String(value ?? "")
+    .trim()
+    .toLowerCase();
+  return normalized === "true" || normalized === "1" || normalized === "yes";
 }
 
 function severityScore(level) {
@@ -1089,6 +1200,14 @@ export default function LogAnalyzer() {
   const [agentBusy, setAgentBusy] = useState(false);
   const [agentError, setAgentError] = useState("");
   const [agentDecisionBusyByStep, setAgentDecisionBusyByStep] = useState({});
+  const [agentCapabilities, setAgentCapabilities] = useState(DEFAULT_AGENT_CAPABILITIES);
+  const [agentActionMode, setAgentActionMode] = useState(false);
+  const [agentActionConfirmation, setAgentActionConfirmation] = useState("");
+  const [agentActionBusyType, setAgentActionBusyType] = useState("");
+  const [agentActionFeedback, setAgentActionFeedback] = useState("");
+  const [allowAgentRestart, setAllowAgentRestart] = useState(false);
+  const [allowAgentDeploy, setAllowAgentDeploy] = useState(false);
+  const [allowAgentCodeChange, setAllowAgentCodeChange] = useState(false);
   const [showTopFilters, setShowTopFilters] = useState(false);
   const [pathSuggestionInput, setPathSuggestionInput] = useState("");
   const [showSavedPathHistory, setShowSavedPathHistory] = useState(false);
@@ -1224,6 +1343,16 @@ export default function LogAnalyzer() {
     () => (Array.isArray(agentEvents) ? [...agentEvents].slice(-40).reverse() : []),
     [agentEvents]
   );
+  const agentConfirmationPhrase = agentCapabilities.confirmationPhrase || "";
+  const isAgentConfirmationSatisfied =
+    agentCapabilities.privilegedActionsEnabled &&
+    agentConfirmationPhrase &&
+    agentActionConfirmation.trim() === agentConfirmationPhrase;
+  const activeRunConstraints =
+    agentRun && typeof agentRun.constraints === "object" && agentRun.constraints ? agentRun.constraints : {};
+  const activeRunAllowsRestart = normalizeBooleanFlag(activeRunConstraints.allow_start);
+  const activeRunAllowsDeploy = normalizeBooleanFlag(activeRunConstraints.allow_deploy);
+  const activeRunAllowsCodeChange = normalizeBooleanFlag(activeRunConstraints.allow_code_changes);
 
   const exclusionList = useMemo(
     () =>
@@ -1790,6 +1919,19 @@ export default function LogAnalyzer() {
     setWebSourcePriority([...DEFAULT_WEB_SOURCE_PRIORITY]);
   }
 
+  const refreshAgentCapabilities = useCallback(async () => {
+    try {
+      const response = await fetch("/api/agent/capabilities", { method: "GET" });
+      if (!response.ok) {
+        throw new Error(await extractApiErrorMessage(response, "Failed loading agent capabilities."));
+      }
+      const payload = await response.json();
+      setAgentCapabilities(normalizeAgentCapabilities(payload));
+    } catch {
+      setAgentCapabilities(DEFAULT_AGENT_CAPABILITIES);
+    }
+  }, []);
+
   const refreshAgentRun = useCallback(async (runId, options = {}) => {
     const normalizedRunId = String(runId || "").trim();
     if (!normalizedRunId) return;
@@ -1816,6 +1958,11 @@ export default function LogAnalyzer() {
     }
   }, []);
 
+  useEffect(() => {
+    if (!agentMode) return;
+    void refreshAgentCapabilities();
+  }, [agentMode, refreshAgentCapabilities]);
+
   async function startAgentRun() {
     const goalValue = agentGoal.trim();
     if (!goalValue) {
@@ -1833,10 +1980,11 @@ export default function LogAnalyzer() {
           goal: goalValue,
           paths: parsedPaths,
           constraints: {
-            allow_start: false,
-            allow_deploy: false,
+            allow_start: Boolean(agentActionMode && allowAgentRestart),
+            allow_deploy: Boolean(agentActionMode && allowAgentDeploy),
+            allow_code_changes: Boolean(agentActionMode && allowAgentCodeChange),
             allow_destructive_actions: false,
-            requested_mode: "supervised_preview",
+            requested_mode: agentActionMode ? "privileged_supervised" : "supervised_preview",
           },
         }),
       });
@@ -1847,6 +1995,7 @@ export default function LogAnalyzer() {
       setAgentRun(payload?.run || null);
       setAgentEvents(Array.isArray(payload?.events) ? payload.events : []);
       setAgentDecisionBusyByStep({});
+      setAgentActionFeedback("");
     } catch (e) {
       setAgentError(e instanceof Error ? e.message : "Failed starting agent run.");
     } finally {
@@ -1899,6 +2048,61 @@ export default function LogAnalyzer() {
       setAgentError(e instanceof Error ? e.message : "Failed submitting decision.");
     } finally {
       setAgentDecisionBusyByStep((prev) => ({ ...prev, [normalizedStepId]: false }));
+    }
+  }
+
+  async function executeAgentPrivilegedAction(actionType) {
+    const normalizedActionType = String(actionType || "").trim().toLowerCase();
+    if (!activeAgentRunId) {
+      setAgentError("Start an agent run before executing privileged actions.");
+      return;
+    }
+    if (!agentCapabilities.privilegedActionsEnabled) {
+      setAgentError("Privileged action mode is disabled in backend configuration.");
+      return;
+    }
+    if (!agentActionMode) {
+      setAgentError("Enable action mode before running privileged actions.");
+      return;
+    }
+    if (!isAgentConfirmationSatisfied) {
+      setAgentError("Enter the exact confirmation phrase before running privileged actions.");
+      return;
+    }
+    setAgentActionBusyType(normalizedActionType);
+    setAgentError("");
+    setAgentActionFeedback("");
+    try {
+      const response = await fetch(
+        `/api/agent/runs/${encodeURIComponent(activeAgentRunId)}/actions/${encodeURIComponent(normalizedActionType)}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            confirmationPhrase: agentActionConfirmation.trim(),
+            note: `Action requested from UI: ${normalizedActionType}`,
+          }),
+        }
+      );
+      if (!response.ok) {
+        throw new Error(await extractApiErrorMessage(response, "Failed executing privileged action."));
+      }
+      const payload = await response.json();
+      setAgentRun(payload?.run || null);
+      setAgentEvents(Array.isArray(payload?.events) ? payload.events : []);
+      const actionPayload = payload?.action && typeof payload.action === "object" ? payload.action : {};
+      const success = Boolean(actionPayload?.success);
+      const exitCode =
+        actionPayload?.exitCode === undefined || actionPayload?.exitCode === null
+          ? "n/a"
+          : String(actionPayload.exitCode);
+      setAgentActionFeedback(
+        `${normalizedActionType} ${success ? "completed" : "failed"} (exit code: ${exitCode}).`
+      );
+    } catch (e) {
+      setAgentError(e instanceof Error ? e.message : "Failed executing privileged action.");
+    } finally {
+      setAgentActionBusyType("");
     }
   }
 
@@ -2314,7 +2518,7 @@ export default function LogAnalyzer() {
             <div>
               <h3>Agent Console (Supervised Preview)</h3>
               <p className="muted">
-                Read-only diagnostics with approval gates. Start/deploy/destructive actions are blocked.
+                Supervised flow with approval gates. Privileged actions require explicit mode enablement.
               </p>
             </div>
             <button
@@ -2359,6 +2563,137 @@ export default function LogAnalyzer() {
                 </div>
               </div>
 
+              <section className="agent-action-mode-panel">
+                <div className="agent-action-mode-header">
+                  <strong>Privileged Action Mode</strong>
+                  <button
+                    type="button"
+                    className={`action-button action-toggle ${agentActionMode ? "is-active" : ""}`}
+                    onClick={() => {
+                      setAgentActionMode((prev) => !prev);
+                      setAgentActionFeedback("");
+                      setAgentError("");
+                    }}
+                    disabled={!agentCapabilities.privilegedActionsEnabled}
+                  >
+                    {agentActionMode ? "Action mode: On" : "Action mode: Off"}
+                  </button>
+                </div>
+                <p className="muted">{agentCapabilities.policyNotice}</p>
+                {agentCapabilities.privilegedActionsEnabled ? (
+                  <>
+                    <div className="agent-action-permissions">
+                      <label className="watch-toggle" htmlFor="allow-agent-restart">
+                        <input
+                          id="allow-agent-restart"
+                          type="checkbox"
+                          checked={allowAgentRestart}
+                          onChange={(event) => setAllowAgentRestart(event.target.checked)}
+                        />
+                        Allow restart in next run
+                      </label>
+                      <label className="watch-toggle" htmlFor="allow-agent-deploy">
+                        <input
+                          id="allow-agent-deploy"
+                          type="checkbox"
+                          checked={allowAgentDeploy}
+                          onChange={(event) => setAllowAgentDeploy(event.target.checked)}
+                        />
+                        Allow deploy in next run
+                      </label>
+                      <label className="watch-toggle" htmlFor="allow-agent-code-change">
+                        <input
+                          id="allow-agent-code-change"
+                          type="checkbox"
+                          checked={allowAgentCodeChange}
+                          onChange={(event) => setAllowAgentCodeChange(event.target.checked)}
+                        />
+                        Allow code change in next run
+                      </label>
+                    </div>
+                    <small className="muted">
+                      These permissions are attached to each newly started run. Existing runs keep prior constraints.
+                    </small>
+                  </>
+                ) : null}
+                {agentActionMode && agentCapabilities.privilegedActionsEnabled ? (
+                  <div className="agent-action-controls">
+                    <div className="filter-field agent-confirmation-field">
+                      <label htmlFor="agent-action-confirmation">Confirmation phrase</label>
+                      <input
+                        id="agent-action-confirmation"
+                        type="text"
+                        value={agentActionConfirmation}
+                        placeholder={agentConfirmationPhrase || "Not configured"}
+                        onChange={(event) => setAgentActionConfirmation(event.target.value)}
+                      />
+                    </div>
+                    <div className="agent-action-buttons">
+                      <button
+                        type="button"
+                        className="action-button action-danger"
+                        disabled={
+                          !activeAgentRunId ||
+                          !isAgentConfirmationSatisfied ||
+                          !agentCapabilities.actions.restart_server ||
+                          !activeRunAllowsRestart ||
+                          Boolean(agentActionBusyType)
+                        }
+                        onClick={() => executeAgentPrivilegedAction("restart_server")}
+                      >
+                        {agentActionBusyType === "restart_server" ? "Running..." : "Restart Server"}
+                      </button>
+                      <button
+                        type="button"
+                        className="action-button action-danger"
+                        disabled={
+                          !activeAgentRunId ||
+                          !isAgentConfirmationSatisfied ||
+                          !agentCapabilities.actions.deploy ||
+                          !activeRunAllowsDeploy ||
+                          Boolean(agentActionBusyType)
+                        }
+                        onClick={() => executeAgentPrivilegedAction("deploy")}
+                      >
+                        {agentActionBusyType === "deploy" ? "Running..." : "Run Deployment"}
+                      </button>
+                      <button
+                        type="button"
+                        className="action-button action-danger"
+                        disabled={
+                          !activeAgentRunId ||
+                          !isAgentConfirmationSatisfied ||
+                          !agentCapabilities.actions.code_change ||
+                          !activeRunAllowsCodeChange ||
+                          Boolean(agentActionBusyType)
+                        }
+                        onClick={() => executeAgentPrivilegedAction("code_change")}
+                      >
+                        {agentActionBusyType === "code_change" ? "Running..." : "Apply Code Change"}
+                      </button>
+                    </div>
+                    {activeAgentRunId ? (
+                      <small className="muted">
+                        Active run permissions: restart={activeRunAllowsRestart ? "yes" : "no"}, deploy=
+                        {activeRunAllowsDeploy ? "yes" : "no"}, code change=
+                        {activeRunAllowsCodeChange ? "yes" : "no"}.
+                      </small>
+                    ) : null}
+                    {activeAgentRunId && activeRunConstraints.extracted_target ? (
+                      <small className="muted">
+                        Detected target from prompt: {String(activeRunConstraints.extracted_target)}
+                      </small>
+                    ) : null}
+                    {!isAgentConfirmationSatisfied ? (
+                      <small className="muted">
+                        Enter exact confirmation phrase and ensure run constraints allow the selected action.
+                      </small>
+                    ) : null}
+                  </div>
+                ) : null}
+                {agentActionFeedback ? <p className="muted">{agentActionFeedback}</p> : null}
+              </section>
+
               <p className="muted agent-console-paths">
                 Planned paths: {parsedPaths.length ? `${parsedPaths.length} selected` : "none selected"}.
               </p>
@@ -2381,6 +2716,7 @@ export default function LogAnalyzer() {
                       {activeAgentSteps.map((step) => {
                         const waitingApproval = step.status === "AWAITING_APPROVAL";
                         const decisionBusy = Boolean(agentDecisionBusyByStep[step.id]);
+                        const stepDetails = buildAgentStepDetailModel(step);
                         return (
                           <article key={step.id} className="agent-step-card">
                             <header>
@@ -2391,6 +2727,104 @@ export default function LogAnalyzer() {
                               Tool: {step.toolName || "unknown"} | Risk: {step.riskLevel || "SAFE"}
                             </p>
                             {step.summary ? <p>{step.summary}</p> : null}
+                            {stepDetails ? (
+                              <div className="agent-step-details">
+                                {stepDetails.primaryCategory ? (
+                                  <p>
+                                    <strong>Primary category:</strong> {stepDetails.primaryCategory}
+                                  </p>
+                                ) : null}
+                                {stepDetails.targetHost ? (
+                                  <p>
+                                    <strong>Target host:</strong> {stepDetails.targetHost}
+                                  </p>
+                                ) : null}
+                                {stepDetails.evidenceSummary ? (
+                                  <p>
+                                    <strong>Evidence:</strong> {stepDetails.evidenceSummary}
+                                  </p>
+                                ) : null}
+                                {stepDetails.unreadablePathHints.length ? (
+                                  <p>
+                                    <strong>Unreadable paths:</strong> {stepDetails.unreadablePathHints.join(" | ")}
+                                  </p>
+                                ) : null}
+                                {stepDetails.options.length ? (
+                                  <div className="agent-step-options">
+                                    {stepDetails.options.map((option, index) => (
+                                      <article key={`${step.id}-${option.key}`} className="agent-step-option">
+                                        <p className="agent-step-option-title">
+                                          <strong>
+                                            Option {index + 1}: {option.title}
+                                          </strong>
+                                        </p>
+                                        <p className="muted">
+                                          Risk: {option.risk}
+                                          {option.requiresApproval ? " | User approval required" : ""}
+                                        </p>
+                                        {option.why ? <p>{option.why}</p> : null}
+                                        {option.actions.length ? (
+                                          <ul className="agent-step-list">
+                                            {option.actions.map((action, actionIndex) => (
+                                              <li key={`${step.id}-${option.key}-action-${actionIndex}`}>
+                                                {action}
+                                              </li>
+                                            ))}
+                                          </ul>
+                                        ) : null}
+                                        {option.successSignals.length ? (
+                                          <p>
+                                            <strong>Success signals:</strong>{" "}
+                                            {option.successSignals.join(" | ")}
+                                          </p>
+                                        ) : null}
+                                        {option.rollback ? (
+                                          <p>
+                                            <strong>Rollback:</strong> {option.rollback}
+                                          </p>
+                                        ) : null}
+                                      </article>
+                                    ))}
+                                  </div>
+                                ) : null}
+                                {stepDetails.approvalChecklist.length ? (
+                                  <p>
+                                    <strong>Approval checklist:</strong>{" "}
+                                    {stepDetails.approvalChecklist.join(" | ")}
+                                  </p>
+                                ) : null}
+                                {stepDetails.blockedActions.length ? (
+                                  <p>
+                                    <strong>Blocked without user input:</strong>{" "}
+                                    {stepDetails.blockedActions.join(" | ")}
+                                  </p>
+                                ) : null}
+                                {stepDetails.executedActions.length ? (
+                                  <div className="agent-executed-actions">
+                                    {stepDetails.executedActions.map((action) => (
+                                      <p key={`${step.id}-executed-${action.key}`}>
+                                        <strong>{action.actionLabel}:</strong>{" "}
+                                        {action.success ? "success" : "failed"}
+                                        {action.exitCode !== null ? ` (exit ${action.exitCode})` : ""}
+                                        {action.timestamp
+                                          ? ` at ${new Date(action.timestamp).toLocaleString()}`
+                                          : ""}
+                                        {action.note ? ` | ${action.note}` : ""}
+                                        {action.error ? ` | ${action.error}` : ""}
+                                      </p>
+                                    ))}
+                                  </div>
+                                ) : null}
+                                {stepDetails.decision ? (
+                                  <p>
+                                    <strong>Decision:</strong> {stepDetails.decision}
+                                    {stepDetails.decisionNote ? ` (${stepDetails.decisionNote})` : ""}
+                                  </p>
+                                ) : stepDetails.note ? (
+                                  <p>{stepDetails.note}</p>
+                                ) : null}
+                              </div>
+                            ) : null}
                             {step.error ? <p className="error">{step.error}</p> : null}
                             {waitingApproval ? (
                               <div className="agent-step-actions">

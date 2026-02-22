@@ -141,6 +141,15 @@ public class ApiController {
     }
   }
 
+  @GetMapping("/agent/capabilities")
+  public ResponseEntity<?> getAgentCapabilities() {
+    try {
+      return ResponseEntity.ok(agentRunService.getCapabilities());
+    } catch (Exception ex) {
+      return serverError(ex.getMessage());
+    }
+  }
+
   @GetMapping("/agent/runs/{runId}")
   public ResponseEntity<?> getAgentRun(@PathVariable("runId") String runId) {
     try {
@@ -193,6 +202,31 @@ public class ApiController {
       String note = toNote(body);
       AgentRun run = agentRunService.rejectStep(runId, stepId, note);
       return ResponseEntity.ok(Map.of("run", run, "events", agentRunService.getEvents(run.getId())));
+    } catch (NoSuchElementException ex) {
+      return notFound(ex.getMessage());
+    } catch (IllegalArgumentException ex) {
+      return badRequest(ex.getMessage());
+    } catch (IllegalStateException ex) {
+      return badRequest(ex.getMessage());
+    } catch (Exception ex) {
+      return serverError(ex.getMessage());
+    }
+  }
+
+  @PostMapping("/agent/runs/{runId}/actions/{actionType}")
+  public ResponseEntity<?> executeAgentAction(
+      @PathVariable("runId") String runId,
+      @PathVariable("actionType") String actionType,
+      @RequestBody(required = false) Map<String, Object> body) {
+    try {
+      Map<String, Object> payload = body == null ? Collections.emptyMap() : body;
+      String note = toNote(body);
+      String confirmationPhrase = toConfirmationPhrase(payload);
+      Map<String, Object> actionResult =
+          agentRunService.executePrivilegedAction(runId, actionType, confirmationPhrase, note);
+      AgentRun run = agentRunService.getRun(runId);
+      return ResponseEntity.ok(
+          Map.of("run", run, "events", agentRunService.getEvents(run.getId()), "action", actionResult));
     } catch (NoSuchElementException ex) {
       return notFound(ex.getMessage());
     } catch (IllegalArgumentException ex) {
@@ -275,6 +309,12 @@ public class ApiController {
       note = payload.get("reason");
     }
     return note == null ? "" : note.toString();
+  }
+
+  private String toConfirmationPhrase(Map<String, Object> body) {
+    Object confirmation =
+        body == null ? null : body.getOrDefault("confirmationPhrase", body.get("confirmation"));
+    return confirmation == null ? "" : confirmation.toString();
   }
 
   private String safeMessage(Exception exception) {

@@ -8,6 +8,9 @@ import com.ailoganalyzer.app.agent.model.AgentStep;
 import com.ailoganalyzer.app.agent.model.AgentStepStatus;
 import com.ailoganalyzer.app.model.LogPayload;
 import com.ailoganalyzer.app.service.LogReadService;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -18,6 +21,9 @@ import java.util.NoSuchElementException;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -25,20 +31,42 @@ import org.springframework.stereotype.Service;
 public class AgentRunService {
   private static final int MAX_EVENT_HISTORY = 500;
   private static final int MAX_PATH_SAMPLE = 5;
+  private static final int MAX_COMMAND_OUTPUT_CHARS = 12000;
+  private static final Pattern TARGET_FROM_GOAL_PATTERN =
+      Pattern.compile("(?i)\\bfor\\s+([a-z0-9][a-z0-9._-]{0,252})\\b");
+  private static final Pattern SAFE_TARGET_PATTERN =
+      Pattern.compile("^[a-z0-9][a-z0-9._-]{0,252}$", Pattern.CASE_INSENSITIVE);
 
   private final LogReadService logReadService;
   private final int maxSteps;
   private final boolean approvalRequiredForRisky;
+  private final boolean privilegedActionsEnabled;
+  private final String privilegedActionsConfirmationPhrase;
+  private final long privilegedActionTimeoutSeconds;
+  private final Map<String, String> privilegedActionCommands = new LinkedHashMap<>();
   private final Map<String, AgentRun> runs = new ConcurrentHashMap<>();
   private final Map<String, List<AgentEvent>> eventsByRun = new ConcurrentHashMap<>();
 
   public AgentRunService(
       LogReadService logReadService,
       @Value("${agent.max-steps:30}") int maxSteps,
-      @Value("${agent.require-approval-for-risky:true}") boolean approvalRequiredForRisky) {
+      @Value("${agent.require-approval-for-risky:true}") boolean approvalRequiredForRisky,
+      @Value("${agent.privileged-actions.enabled:false}") boolean privilegedActionsEnabled,
+      @Value("${agent.privileged-actions.confirmation-phrase:ENABLE_AGENT_ACTIONS}")
+          String privilegedActionsConfirmationPhrase,
+      @Value("${agent.privileged-actions.restart-command:}") String restartCommand,
+      @Value("${agent.privileged-actions.deploy-command:}") String deployCommand,
+      @Value("${agent.privileged-actions.code-change-command:}") String codeChangeCommand,
+      @Value("${agent.privileged-actions.timeout-seconds:600}") long privilegedActionTimeoutSeconds) {
     this.logReadService = logReadService;
     this.maxSteps = Math.max(1, maxSteps);
     this.approvalRequiredForRisky = approvalRequiredForRisky;
+    this.privilegedActionsEnabled = privilegedActionsEnabled;
+    this.privilegedActionsConfirmationPhrase = safeTrim(privilegedActionsConfirmationPhrase);
+    this.privilegedActionTimeoutSeconds = Math.max(5L, privilegedActionTimeoutSeconds);
+    privilegedActionCommands.put("restart_server", safeTrim(restartCommand));
+    privilegedActionCommands.put("deploy", safeTrim(deployCommand));
+    privilegedActionCommands.put("code_change", safeTrim(codeChangeCommand));
   }
 
   public synchronized AgentRun createRun(
@@ -58,7 +86,13 @@ public class AgentRunService {
     run.setCreatedAt(now);
     run.setUpdatedAt(now);
     run.setPaths(normalizePaths(requestedPaths));
-    run.setConstraints(buildConstraints(constraints));
+    Map<String, Object> builtConstraints = buildConstraints(constraints);
+    String extractedTarget = extractTargetFromGoal(normalizedGoal);
+    if (!extractedTarget.isEmpty()) {
+      builtConstraints.put("extracted_target", extractedTarget);
+      builtConstraints.put("target_source", "goal_prompt_for_clause");
+    }
+    run.setConstraints(builtConstraints);
 
     List<AgentStep> steps = buildInitialSteps(run);
     if (steps.size() > maxSteps) {
@@ -98,6 +132,103 @@ public class AgentRunService {
     return events == null ? List.of() : new ArrayList<>(events);
   }
 
+  public synchronized Map<String, Object> getCapabilities() {
+    Map<String, Object> actions = new LinkedHashMap<>();
+    actions.put("restart_server", privilegedActionsEnabled && hasConfiguredActionCommand("restart_server"));
+    actions.put("deploy", privilegedActionsEnabled && hasConfiguredActionCommand("deploy"));
+    actions.put("code_change", privilegedActionsEnabled && hasConfiguredActionCommand("code_change"));
+
+    Map<String, Object> output = new LinkedHashMap<>();
+    output.put("privilegedActionsEnabled", privilegedActionsEnabled);
+    output.put("confirmationPhrase", privilegedActionsConfirmationPhrase);
+    output.put("timeoutSeconds", privilegedActionTimeoutSeconds);
+    output.put("actions", actions);
+    output.put(
+        "policyNotice",
+        privilegedActionsEnabled
+            ? "Privileged actions require explicit user confirmation phrase and run-level permissions."
+            : "Privileged action mode is disabled in backend configuration.");
+    return output;
+  }
+
+  public synchronized Map<String, Object> executePrivilegedAction(
+      String runId, String actionType, String confirmationPhrase, String note) {
+    AgentRun run = getRunOrThrow(runId);
+    String normalizedActionType = normalizeActionType(actionType);
+    if (!privilegedActionsEnabled) {
+      throw new IllegalStateException("Privileged action mode is disabled by configuration.");
+    }
+    if (!hasConfiguredActionCommand(normalizedActionType)) {
+      throw new IllegalStateException(
+          "Privileged action is not configured for type: " + normalizedActionType);
+    }
+
+    String normalizedConfirmation = safeTrim(confirmationPhrase);
+    if (privilegedActionsConfirmationPhrase.isEmpty()
+        || !privilegedActionsConfirmationPhrase.equals(normalizedConfirmation)) {
+      throw new IllegalArgumentException("Confirmation phrase mismatch for privileged action.");
+    }
+
+    requireRunConstraintPermission(run, normalizedActionType);
+
+    AgentStep remediationStep = findStepByToolName(run, "propose_supervised_actions");
+    if (remediationStep == null) {
+      throw new IllegalStateException("Remediation plan step not found for this run.");
+    }
+    if (!AgentStepStatus.COMPLETED.name().equals(remediationStep.getStatus())) {
+      throw new IllegalStateException(
+          "Approve the remediation plan step before executing privileged actions.");
+    }
+
+    String commandTemplate = privilegedActionCommands.get(normalizedActionType);
+    String command = renderPrivilegedActionCommand(run, normalizedActionType, commandTemplate);
+    String actionLabel = actionLabel(normalizedActionType);
+    setRunStatus(run, AgentRunStatus.RUNNING, "Executing privileged action: " + actionLabel);
+    addEvent(
+        run.getId(),
+        remediationStep.getId(),
+        "ACTION_STARTED",
+        "Privileged action started: " + actionLabel,
+        payload("actionType", normalizedActionType, "actionLabel", actionLabel));
+
+    Map<String, Object> actionResult = runPrivilegedCommand(command);
+    appendExecutedAction(remediationStep, run, normalizedActionType, note, actionResult);
+
+    if (Boolean.TRUE.equals(actionResult.get("success"))) {
+      addEvent(
+          run.getId(),
+          remediationStep.getId(),
+          "ACTION_COMPLETED",
+          "Privileged action completed: " + actionLabel,
+          payload(
+              "actionType",
+              normalizedActionType,
+              "actionLabel",
+              actionLabel,
+              "exitCode",
+              actionResult.get("exitCode")));
+      setRunStatus(run, AgentRunStatus.RUNNING, "Privileged action completed: " + actionLabel);
+    } else {
+      addEvent(
+          run.getId(),
+          remediationStep.getId(),
+          "ACTION_FAILED",
+          "Privileged action failed: " + actionLabel,
+          payload(
+              "actionType",
+              normalizedActionType,
+              "actionLabel",
+              actionLabel,
+              "exitCode",
+              actionResult.get("exitCode"),
+              "error",
+              asString(actionResult.get("error"))));
+      setRunStatus(run, AgentRunStatus.RUNNING, "Privileged action failed: " + actionLabel);
+    }
+    run.setUpdatedAt(Instant.now());
+    return actionResult;
+  }
+
   public synchronized AgentRun approveStep(String runId, String stepId, String note) {
     AgentRun run = getRunOrThrow(runId);
     AgentStep step = getStepOrThrow(run, stepId);
@@ -106,16 +237,27 @@ public class AgentRunService {
     }
 
     setStepStatus(step, AgentStepStatus.COMPLETED);
-    step.setSummary(
-        "User approved the step. Skeleton mode records decision only; no start/deploy action was executed.");
-    step.setOutput(
-        payload(
-            "decision",
-            "approved",
-            "note",
-            safeTrim(note),
-            "executionPolicy",
-            "No restart/deploy/destructive actions are executed in Step 1 skeleton."));
+    if ("propose_supervised_actions".equals(step.getToolName())) {
+      Map<String, Object> planOutput = ensureSupervisedRemediationOutput(run, step);
+      planOutput.put("decision", "approved");
+      planOutput.put("decisionNote", safeTrim(note));
+      planOutput.put(
+          "executionPolicy",
+          "Approval recorded. No restart/deploy/destructive actions are executed automatically.");
+      step.setOutput(planOutput);
+      step.setSummary(buildSupervisedPlanSummary(planOutput, "approved"));
+    } else {
+      step.setSummary(
+          "User approved the step. Skeleton mode records decision only; no start/deploy action was executed.");
+      step.setOutput(
+          payload(
+              "decision",
+              "approved",
+              "note",
+              safeTrim(note),
+              "executionPolicy",
+              "No restart/deploy/destructive actions are executed in Step 1 skeleton."));
+    }
 
     addEvent(
         run.getId(),
@@ -137,15 +279,24 @@ public class AgentRunService {
     }
 
     setStepStatus(step, AgentStepStatus.REJECTED);
-    step.setSummary("User rejected the step. Continuing with safe verification only.");
-    step.setOutput(
-        payload(
-            "decision",
-            "rejected",
-            "note",
-            safeTrim(note),
-            "executionPolicy",
-            "Rejected step was not executed."));
+    if ("propose_supervised_actions".equals(step.getToolName())) {
+      Map<String, Object> planOutput = ensureSupervisedRemediationOutput(run, step);
+      planOutput.put("decision", "rejected");
+      planOutput.put("decisionNote", safeTrim(note));
+      planOutput.put("executionPolicy", "Rejected plan was not executed.");
+      step.setOutput(planOutput);
+      step.setSummary(buildSupervisedPlanSummary(planOutput, "rejected"));
+    } else {
+      step.setSummary("User rejected the step. Continuing with safe verification only.");
+      step.setOutput(
+          payload(
+              "decision",
+              "rejected",
+              "note",
+              safeTrim(note),
+              "executionPolicy",
+              "Rejected step was not executed."));
+    }
 
     addEvent(
         run.getId(),
@@ -175,6 +326,11 @@ public class AgentRunService {
 
       if (next.isRequiresApproval() && approvalRequiredForRisky) {
         if (!AgentStepStatus.AWAITING_APPROVAL.name().equals(next.getStatus())) {
+          if ("propose_supervised_actions".equals(next.getToolName())) {
+            Map<String, Object> planOutput = ensureSupervisedRemediationOutput(run, next);
+            next.setOutput(planOutput);
+            next.setSummary(buildSupervisedPlanSummary(planOutput, "awaiting"));
+          }
           setStepStatus(next, AgentStepStatus.AWAITING_APPROVAL);
           setRunStatus(
               run,
@@ -219,6 +375,9 @@ public class AgentRunService {
       } else if ("classify_issue_candidates".equals(step.getToolName())) {
         output = classifyIssueCandidates(run);
         summary = "Generated issue classification hints from goal and evidence.";
+      } else if ("propose_supervised_actions".equals(step.getToolName())) {
+        output = ensureSupervisedRemediationOutput(run, step);
+        summary = buildSupervisedPlanSummary(output, "generated");
       } else if ("verify_post_action_health".equals(step.getToolName())) {
         setRunStatus(run, AgentRunStatus.VERIFYING, "Running supervised verification checks.");
         output = verifyHealth(run);
@@ -348,6 +507,544 @@ public class AgentRunService {
         "note",
         "Classification is heuristic in Step 1. Use finding details and user approval before any remediation.");
     return output;
+  }
+
+  private Map<String, Object> ensureSupervisedRemediationOutput(AgentRun run, AgentStep step) {
+    Map<String, Object> existing = step.getOutput();
+    if (existing != null && !existing.isEmpty() && existing.containsKey("options")) {
+      return new LinkedHashMap<>(existing);
+    }
+    return buildSupervisedRemediationPlan(run);
+  }
+
+  private Map<String, Object> buildSupervisedRemediationPlan(AgentRun run) {
+    Map<String, Object> evidenceOutput = findOutputByToolName(run, "collect_log_evidence");
+    Map<String, Object> classificationOutput = findOutputByToolName(run, "classify_issue_candidates");
+
+    List<String> suggestedBuckets = asStringList(classificationOutput.get("suggestedBuckets"));
+    if (suggestedBuckets.isEmpty()) {
+      suggestedBuckets.add("App bug / NullPointer / ClassNotFound / config");
+    }
+    String primaryBucket = suggestedBuckets.get(0);
+    String targetHost = resolveTargetForRun(run);
+
+    int totalPaths = asInt(evidenceOutput.get("totalPaths"));
+    int sampledPaths = asInt(evidenceOutput.get("sampledPaths"));
+    int readablePaths = asInt(evidenceOutput.get("readablePaths"));
+    List<Map<String, Object>> pathResults = asMapList(evidenceOutput.get("pathResults"));
+
+    List<String> readableSamplePaths = new ArrayList<>();
+    List<String> unreadablePathHints = new ArrayList<>();
+    for (Map<String, Object> pathResult : pathResults) {
+      String status = asString(pathResult.get("status")).toLowerCase();
+      String path = asString(pathResult.get("path"));
+      if ("readable".equals(status) && !path.isEmpty() && readableSamplePaths.size() < 3) {
+        readableSamplePaths.add(path);
+      }
+      if ("error".equals(status) && unreadablePathHints.size() < 3) {
+        String error = asString(pathResult.get("error"));
+        if (!path.isEmpty() && !error.isEmpty()) {
+          unreadablePathHints.add(path + " -> " + error);
+        } else if (!path.isEmpty()) {
+          unreadablePathHints.add(path);
+        } else if (!error.isEmpty()) {
+          unreadablePathHints.add(error);
+        }
+      }
+    }
+
+    String evidenceSummary;
+    if (totalPaths <= 0) {
+      evidenceSummary =
+          "No explicit paths were provided. Remediation options are based on goal and classification only.";
+    } else {
+      evidenceSummary =
+          "Readable paths: "
+              + readablePaths
+              + "/"
+              + sampledPaths
+              + " sampled ("
+              + totalPaths
+              + " configured).";
+    }
+
+    List<Map<String, Object>> options = new ArrayList<>();
+    options.add(
+        payload(
+            "id",
+            "validate-signature",
+            "title",
+            "Validate failure signature and blast radius (read-only)",
+            "risk",
+            AgentRiskLevel.SAFE.name(),
+            "requiresApproval",
+            false,
+            "why",
+            "Confirming the dominant failure signature first prevents incorrect remediation.",
+            "actions",
+            List.of(
+                "Capture a 15-30 minute log window around first failure timestamp.",
+                "Group repeated stack traces and impacted endpoints/user flows.",
+                "Confirm whether failures are isolated to one node/path or broad across instances."),
+            "successSignals",
+            List.of(
+                "Dominant error signature is consistently identified.",
+                "Blast radius is documented with affected scope."),
+            "rollback",
+            "Not required for read-only diagnostics."));
+
+    options.add(
+        payload(
+            "id",
+            "targeted-remediation",
+            "title",
+            "Prepare targeted remediation for " + primaryBucket,
+            "risk",
+            AgentRiskLevel.APPROVAL_REQUIRED.name(),
+            "requiresApproval",
+            true,
+            "why",
+            "Apply the smallest possible change aligned to the likely issue class.",
+            "actions",
+            buildTargetedActions(primaryBucket),
+            "successSignals",
+            buildTargetedSuccessSignals(primaryBucket),
+            "rollback",
+            "Create explicit rollback steps and owner sign-off before applying any runtime/config/code change."));
+
+    options.add(
+        payload(
+            "id",
+            "controlled-validation",
+            "title",
+            "Controlled rollout and post-change verification",
+            "risk",
+            AgentRiskLevel.APPROVAL_REQUIRED.name(),
+            "requiresApproval",
+            true,
+            "why",
+            "Reduce incident risk by validating the change with measurable health checks.",
+            "actions",
+            List.of(
+                "Apply change in lower environment or constrained canary scope first.",
+                "Track error-rate trend and repeating exception signatures for at least 15-30 minutes.",
+                "Stop rollout immediately if new high-severity signatures appear."),
+            "successSignals",
+            List.of(
+                "Target error signature frequency decreases materially.",
+                "No new high-severity regressions are introduced."),
+            "rollback",
+            "Revert to prior known-good config/build and re-run health verification checks."));
+
+    Map<String, Object> output = new LinkedHashMap<>();
+    output.put("goal", run.getGoal());
+    if (!targetHost.isEmpty()) {
+      output.put("targetHost", targetHost);
+    }
+    output.put("primaryCategory", primaryBucket);
+    output.put("suggestedBuckets", suggestedBuckets);
+    output.put("evidenceSummary", evidenceSummary);
+    output.put("options", options);
+    output.put(
+        "approvalChecklist",
+        List.of(
+            "Named owner confirms scope, timeline, and communication plan.",
+            "Rollback procedure is documented and validated before execution.",
+            "Success metrics and abort thresholds are explicitly defined.",
+            "Production-impacting actions require explicit user approval.",
+            "Agent remains read-only and will not execute start/deploy/destructive actions."));
+    output.put(
+        "blockedActions",
+        List.of("Service restart", "Deployment", "Data deletion", "Infrastructure mutation"));
+    if (!readableSamplePaths.isEmpty()) {
+      output.put("readableSamplePaths", readableSamplePaths);
+    }
+    if (!unreadablePathHints.isEmpty()) {
+      output.put("unreadablePathHints", unreadablePathHints);
+    }
+    output.put(
+        "executionPolicy",
+        "Plan-only mode. Remediation execution requires explicit user approval and manual operator action.");
+    return output;
+  }
+
+  private List<String> buildTargetedActions(String primaryBucket) {
+    String bucket = safeTrim(primaryBucket).toLowerCase();
+    if (bucket.contains("db2") || bucket.contains("jdbc")) {
+      return List.of(
+          "Validate DB2 host/port, credentials, and pool timeout settings against current environment.",
+          "Confirm JDBC driver compatibility and SQLSTATE details in failing stack traces.",
+          "Run controlled connection test in non-prod before any production changes.");
+    }
+    if (bucket.contains("ssl") || bucket.contains("tls") || bucket.contains("cert")) {
+      return List.of(
+          "Inspect certificate chain, expiry, and truststore entries for the failing endpoint.",
+          "Confirm TLS protocol/cipher overlap between client and server.",
+          "Prepare certificate/truststore update procedure with rollback artifact.");
+    }
+    if (bucket.contains("auth") || bucket.contains("sso") || bucket.contains("token")) {
+      return List.of(
+          "Validate token expiry, signature validation, and issuer/audience claims.",
+          "Confirm role/permission mappings for affected endpoint flows.",
+          "Prepare minimal auth config correction with rollback to prior policy.");
+    }
+    if (bucket.contains("memory") || bucket.contains("oom") || bucket.contains("heap")) {
+      return List.of(
+          "Capture heap/GC indicators around failure window to confirm pressure pattern.",
+          "Define minimal JVM tuning or memory-leak containment hypothesis.",
+          "Apply one change at a time with monitored rollback threshold.");
+    }
+    if (bucket.contains("timeout") || bucket.contains("integration")) {
+      return List.of(
+          "Measure downstream latency and timeout distribution for failed calls.",
+          "Tune client timeout/retry settings with bounded retries and circuit-breaker protection.",
+          "Coordinate with downstream owner before production-side timeout changes.");
+    }
+    if (bucket.contains("search") || bucket.contains("solr")) {
+      return List.of(
+          "Check Solr core/collection health, replica status, and query errors.",
+          "Isolate failing query/index pipeline stage and replay in non-prod.",
+          "Prepare targeted index/query fix with rollback for schema or config changes.");
+    }
+    if (bucket.contains("cache") || bucket.contains("session")) {
+      return List.of(
+          "Validate cache/session invalidation sequence and key lifecycle.",
+          "Confirm session affinity/replication behavior across nodes.",
+          "Apply minimal cache/session config correction with rollback guardrails.");
+    }
+    if (bucket.contains("network") || bucket.contains("dns")) {
+      return List.of(
+          "Validate DNS resolution and route reachability from the application host.",
+          "Confirm firewall and network policy consistency for affected endpoint paths.",
+          "Coordinate controlled network/policy change with rapid rollback path.");
+    }
+    return List.of(
+        "Capture full stack trace and identify exact failing class/method/config key.",
+        "Prepare minimal code/config fix for the failing branch only.",
+        "Validate in lower environment using same input pattern before production approval.");
+  }
+
+  private List<String> buildTargetedSuccessSignals(String primaryBucket) {
+    String bucket = safeTrim(primaryBucket).toLowerCase();
+    if (bucket.contains("db2") || bucket.contains("jdbc")) {
+      return List.of(
+          "Connection errors/SQLSTATE connectivity failures stop recurring.",
+          "Database response latency remains within normal threshold.");
+    }
+    if (bucket.contains("ssl") || bucket.contains("tls") || bucket.contains("cert")) {
+      return List.of(
+          "Handshake/trust validation errors disappear.",
+          "Secure calls complete without certificate exceptions.");
+    }
+    if (bucket.contains("auth") || bucket.contains("sso") || bucket.contains("token")) {
+      return List.of(
+          "401/403 spikes are reduced for affected flow.",
+          "Token validation/authz checks pass for legitimate requests.");
+    }
+    if (bucket.contains("memory") || bucket.contains("oom") || bucket.contains("heap")) {
+      return List.of(
+          "OOM/GC-thrash signatures no longer appear.",
+          "Heap usage trend stabilizes after traffic normalization.");
+    }
+    return List.of(
+        "Target failure signature frequency decreases.",
+        "No new high-severity error signature is introduced.");
+  }
+
+  private String buildSupervisedPlanSummary(Map<String, Object> output, String phase) {
+    int optionCount = asMapList(output.get("options")).size();
+    String category = asString(output.get("primaryCategory"));
+    if (category.isEmpty()) {
+      category = "unclassified runtime issue";
+    }
+    if ("awaiting".equals(phase)) {
+      return "Prepared "
+          + optionCount
+          + " supervised remediation options for "
+          + category
+          + ". Awaiting explicit user approval for risky actions.";
+    }
+    if ("approved".equals(phase)) {
+      return "User approved supervised remediation plan for "
+          + category
+          + ". No automated start/deploy action was executed.";
+    }
+    if ("rejected".equals(phase)) {
+      return "User rejected supervised remediation plan for "
+          + category
+          + ". Continuing with safe verification only.";
+    }
+    return "Prepared "
+        + optionCount
+        + " supervised remediation options for "
+        + category
+        + " with rollback and approval checklist.";
+  }
+
+  private Map<String, Object> findOutputByToolName(AgentRun run, String toolName) {
+    String normalizedTool = safeTrim(toolName);
+    for (AgentStep step : run.getSteps()) {
+      if (normalizedTool.equals(step.getToolName()) && step.getOutput() != null) {
+        return step.getOutput();
+      }
+    }
+    return new LinkedHashMap<>();
+  }
+
+  private AgentStep findStepByToolName(AgentRun run, String toolName) {
+    String normalizedTool = safeTrim(toolName);
+    for (AgentStep step : run.getSteps()) {
+      if (normalizedTool.equals(step.getToolName())) {
+        return step;
+      }
+    }
+    return null;
+  }
+
+  private boolean hasConfiguredActionCommand(String actionType) {
+    String command = privilegedActionCommands.get(actionType);
+    return command != null && !command.isEmpty();
+  }
+
+  private String normalizeActionType(String actionType) {
+    String normalized = safeTrim(actionType).toLowerCase().replace('-', '_');
+    if (normalized.isEmpty()) {
+      throw new IllegalArgumentException("Action type is required.");
+    }
+    if (!privilegedActionCommands.containsKey(normalized)) {
+      throw new IllegalArgumentException("Unsupported action type: " + normalized);
+    }
+    return normalized;
+  }
+
+  private void requireRunConstraintPermission(AgentRun run, String actionType) {
+    Map<String, Object> constraints = run.getConstraints() == null ? Map.of() : run.getConstraints();
+    boolean allowStart = toBooleanConstraint(constraints.get("allow_start"));
+    boolean allowDeploy = toBooleanConstraint(constraints.get("allow_deploy"));
+    boolean allowCodeChanges = toBooleanConstraint(constraints.get("allow_code_changes"));
+
+    if ("restart_server".equals(actionType) && !allowStart) {
+      throw new IllegalStateException("Run constraints block restart action. Enable allow_start first.");
+    }
+    if ("deploy".equals(actionType) && !allowDeploy) {
+      throw new IllegalStateException("Run constraints block deploy action. Enable allow_deploy first.");
+    }
+    if ("code_change".equals(actionType) && !allowCodeChanges) {
+      throw new IllegalStateException(
+          "Run constraints block code-change action. Enable allow_code_changes first.");
+    }
+  }
+
+  private String actionLabel(String actionType) {
+    if ("restart_server".equals(actionType)) {
+      return "Restart server";
+    }
+    if ("deploy".equals(actionType)) {
+      return "Run deployment";
+    }
+    if ("code_change".equals(actionType)) {
+      return "Apply code change";
+    }
+    return actionType;
+  }
+
+  private String renderPrivilegedActionCommand(
+      AgentRun run, String actionType, String commandTemplate) {
+    String template = safeTrim(commandTemplate);
+    if (template.isEmpty()) {
+      throw new IllegalStateException("No command configured for action: " + actionType);
+    }
+
+    String target = resolveTargetForRun(run);
+    boolean needsTarget =
+        template.contains("{target}") || template.contains("{target_host}") || template.contains("{host}");
+    if (needsTarget && target.isEmpty()) {
+      throw new IllegalStateException(
+          "No target extracted from goal. Use phrasing like 'for server-hostname' or configure a fixed command.");
+    }
+
+    String rendered = template;
+    if (!target.isEmpty()) {
+      rendered = rendered.replace("{target}", target);
+      rendered = rendered.replace("{target_host}", target);
+      rendered = rendered.replace("{host}", target);
+    }
+    rendered = rendered.replace("{action}", actionType);
+    return rendered;
+  }
+
+  private String resolveTargetForRun(AgentRun run) {
+    if (run == null) {
+      return "";
+    }
+    Map<String, Object> constraints = run.getConstraints();
+    String fromConstraints = asString(constraints == null ? null : constraints.get("extracted_target"));
+    if (!fromConstraints.isEmpty()) {
+      return fromConstraints;
+    }
+    return extractTargetFromGoal(run.getGoal());
+  }
+
+  private String extractTargetFromGoal(String goal) {
+    String normalizedGoal = safeTrim(goal);
+    if (normalizedGoal.isEmpty()) {
+      return "";
+    }
+    Matcher matcher = TARGET_FROM_GOAL_PATTERN.matcher(normalizedGoal);
+    if (!matcher.find()) {
+      return "";
+    }
+    String candidate = safeTrim(matcher.group(1));
+    if (!isSafeTargetToken(candidate)) {
+      return "";
+    }
+    return candidate;
+  }
+
+  private boolean isSafeTargetToken(String token) {
+    String normalized = safeTrim(token);
+    if (normalized.isEmpty()) {
+      return false;
+    }
+    return SAFE_TARGET_PATTERN.matcher(normalized).matches();
+  }
+
+  private Map<String, Object> runPrivilegedCommand(String command) {
+    Map<String, Object> output = new LinkedHashMap<>();
+    long startedAt = System.currentTimeMillis();
+    StringBuilder commandOutput = new StringBuilder();
+    Process process = null;
+    Thread readerThread = null;
+    try {
+      ProcessBuilder processBuilder = buildCommandProcess(command);
+      processBuilder.redirectErrorStream(true);
+      process = processBuilder.start();
+
+      final Process streamProcess = process;
+      readerThread =
+          new Thread(
+              () -> captureProcessOutput(streamProcess, commandOutput, MAX_COMMAND_OUTPUT_CHARS),
+              "agent-action-output-reader");
+      readerThread.setDaemon(true);
+      readerThread.start();
+
+      boolean completed = process.waitFor(privilegedActionTimeoutSeconds, TimeUnit.SECONDS);
+      if (!completed) {
+        process.destroyForcibly();
+      }
+      if (readerThread != null) {
+        readerThread.join(1500L);
+      }
+
+      int exitCode = completed ? process.exitValue() : -1;
+      long durationMs = Math.max(0L, System.currentTimeMillis() - startedAt);
+      output.put("actionCommand", command);
+      output.put("durationMs", durationMs);
+      output.put("completed", completed);
+      output.put("exitCode", exitCode);
+      output.put("success", completed && exitCode == 0);
+      output.put("outputSnippet", safeTrim(commandOutput.toString()));
+      if (!completed) {
+        output.put(
+            "error",
+            "Action command timed out after " + privilegedActionTimeoutSeconds + " seconds.");
+      }
+      return output;
+    } catch (Exception ex) {
+      output.put("actionCommand", command);
+      output.put("durationMs", Math.max(0L, System.currentTimeMillis() - startedAt));
+      output.put("completed", false);
+      output.put("exitCode", -1);
+      output.put("success", false);
+      output.put("outputSnippet", safeTrim(commandOutput.toString()));
+      output.put("error", safeMessage(ex.getMessage()));
+      return output;
+    } finally {
+      if (process != null && process.isAlive()) {
+        process.destroyForcibly();
+      }
+      if (readerThread != null && readerThread.isAlive()) {
+        readerThread.interrupt();
+      }
+    }
+  }
+
+  private ProcessBuilder buildCommandProcess(String command) {
+    String normalizedCommand = safeTrim(command);
+    if (normalizedCommand.isEmpty()) {
+      throw new IllegalArgumentException("Privileged action command is empty.");
+    }
+    String osName = System.getProperty("os.name", "").toLowerCase();
+    if (osName.contains("win")) {
+      return new ProcessBuilder("cmd.exe", "/c", normalizedCommand);
+    }
+    return new ProcessBuilder("/bin/sh", "-c", normalizedCommand);
+  }
+
+  private void captureProcessOutput(Process process, StringBuilder output, int maxChars) {
+    try (BufferedReader reader =
+        new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
+      String line;
+      while ((line = reader.readLine()) != null) {
+        if (output.length() >= maxChars) {
+          continue;
+        }
+        if (output.length() > 0) {
+          output.append('\n');
+        }
+        int remaining = maxChars - output.length();
+        if (remaining <= 0) {
+          continue;
+        }
+        if (line.length() <= remaining) {
+          output.append(line);
+        } else {
+          output.append(line, 0, remaining);
+        }
+      }
+    } catch (Exception ignored) {
+      // ignore stream read failures and rely on process status
+    }
+    if (output.length() >= maxChars) {
+      output.append("\n...output truncated...");
+    }
+  }
+
+  private void appendExecutedAction(
+      AgentStep remediationStep,
+      AgentRun run,
+      String actionType,
+      String note,
+      Map<String, Object> actionResult) {
+    Map<String, Object> planOutput = ensureSupervisedRemediationOutput(run, remediationStep);
+    List<Map<String, Object>> executedActions = asMapList(planOutput.get("executedActions"));
+
+    Map<String, Object> actionRecord = new LinkedHashMap<>();
+    actionRecord.put("actionType", actionType);
+    actionRecord.put("actionLabel", actionLabel(actionType));
+    actionRecord.put("timestamp", Instant.now().toString());
+    actionRecord.put("note", safeTrim(note));
+    actionRecord.put("success", Boolean.TRUE.equals(actionResult.get("success")));
+    actionRecord.put("exitCode", asInt(actionResult.get("exitCode")));
+    actionRecord.put("durationMs", asLong(actionResult.get("durationMs")));
+    actionRecord.put("outputSnippet", asString(actionResult.get("outputSnippet")));
+    if (!asString(actionResult.get("error")).isEmpty()) {
+      actionRecord.put("error", asString(actionResult.get("error")));
+    }
+
+    executedActions.add(actionRecord);
+    planOutput.put("executedActions", executedActions);
+    planOutput.put("lastAction", actionRecord);
+    planOutput.put(
+        "executionPolicy",
+        "Privileged command execution requires explicit mode enablement, confirmation phrase, and run constraints.");
+    remediationStep.setOutput(planOutput);
+    remediationStep.setSummary(
+        "Executed privileged action: "
+            + actionLabel(actionType)
+            + " (success="
+            + Boolean.TRUE.equals(actionResult.get("success"))
+            + ").");
   }
 
   private Map<String, Object> verifyHealth(AgentRun run) {
@@ -507,6 +1204,7 @@ public class AgentRunService {
     Map<String, Object> output = new LinkedHashMap<>();
     output.put("allow_start", false);
     output.put("allow_deploy", false);
+    output.put("allow_code_changes", false);
     output.put("allow_destructive_actions", false);
     output.put("require_user_approval_for_risky_steps", approvalRequiredForRisky);
     if (constraints != null) {
@@ -580,6 +1278,71 @@ public class AgentRunService {
     } catch (Exception ignored) {
       return 0;
     }
+  }
+
+  private long asLong(Object value) {
+    if (value instanceof Number) {
+      return ((Number) value).longValue();
+    }
+    if (value == null) {
+      return 0L;
+    }
+    try {
+      return Long.parseLong(value.toString().trim());
+    } catch (Exception ignored) {
+      return 0L;
+    }
+  }
+
+  private boolean toBooleanConstraint(Object value) {
+    if (value instanceof Boolean) {
+      return (Boolean) value;
+    }
+    String normalized = asString(value).toLowerCase();
+    return "true".equals(normalized) || "1".equals(normalized) || "yes".equals(normalized);
+  }
+
+  private String asString(Object value) {
+    return value == null ? "" : safeTrim(value.toString());
+  }
+
+  private List<String> asStringList(Object value) {
+    List<String> output = new ArrayList<>();
+    if (value instanceof List<?>) {
+      for (Object item : (List<?>) value) {
+        String normalized = asString(item);
+        if (!normalized.isEmpty()) {
+          output.add(normalized);
+        }
+      }
+      return output;
+    }
+    String single = asString(value);
+    if (!single.isEmpty()) {
+      output.add(single);
+    }
+    return output;
+  }
+
+  private List<Map<String, Object>> asMapList(Object value) {
+    List<Map<String, Object>> output = new ArrayList<>();
+    if (!(value instanceof List<?>)) {
+      return output;
+    }
+    for (Object item : (List<?>) value) {
+      if (item instanceof Map<?, ?>) {
+        Map<String, Object> normalized = new LinkedHashMap<>();
+        ((Map<?, ?>) item)
+            .forEach(
+                (key, val) -> {
+                  if (key != null) {
+                    normalized.put(key.toString(), val);
+                  }
+                });
+        output.add(normalized);
+      }
+    }
+    return output;
   }
 
   private Map<String, Object> payload(Object... keyValues) {
