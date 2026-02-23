@@ -37,6 +37,7 @@ public class AgentRunService {
   private static final Pattern SAFE_TARGET_PATTERN =
       Pattern.compile("^[a-z0-9][a-z0-9._-]{0,252}$", Pattern.CASE_INSENSITIVE);
 
+  private final AgentLlmService agentLlmService;
   private final LogReadService logReadService;
   private final int maxSteps;
   private final boolean approvalRequiredForRisky;
@@ -48,6 +49,7 @@ public class AgentRunService {
   private final Map<String, List<AgentEvent>> eventsByRun = new ConcurrentHashMap<>();
 
   public AgentRunService(
+      AgentLlmService agentLlmService,
       LogReadService logReadService,
       @Value("${agent.max-steps:30}") int maxSteps,
       @Value("${agent.require-approval-for-risky:true}") boolean approvalRequiredForRisky,
@@ -58,6 +60,7 @@ public class AgentRunService {
       @Value("${agent.privileged-actions.deploy-command:}") String deployCommand,
       @Value("${agent.privileged-actions.code-change-command:}") String codeChangeCommand,
       @Value("${agent.privileged-actions.timeout-seconds:600}") long privilegedActionTimeoutSeconds) {
+    this.agentLlmService = agentLlmService;
     this.logReadService = logReadService;
     this.maxSteps = Math.max(1, maxSteps);
     this.approvalRequiredForRisky = approvalRequiredForRisky;
@@ -466,46 +469,51 @@ public class AgentRunService {
   }
 
   private Map<String, Object> classifyIssueCandidates(AgentRun run) {
-    String goal = safeTrim(run.getGoal()).toLowerCase();
-    List<String> suggestedBuckets = new ArrayList<>();
-
-    if (goal.contains("db2") || goal.contains("sqlstate") || goal.contains("jdbc")) {
-      suggestedBuckets.add("DB2 / JDBC connectivity");
-    }
-    if (goal.contains("memory") || goal.contains("oom") || goal.contains("heap")) {
-      suggestedBuckets.add("JVM memory");
-    }
-    if (goal.contains("timeout") || goal.contains("latency") || goal.contains("downstream")) {
-      suggestedBuckets.add("Integration / outbound timeout");
-    }
-    if (goal.contains("ssl") || goal.contains("tls") || goal.contains("cert")) {
-      suggestedBuckets.add("SSL/TLS / certs");
-    }
-    if (goal.contains("401")
-        || goal.contains("403")
-        || goal.contains("auth")
-        || goal.contains("token")
-        || goal.contains("sso")) {
-      suggestedBuckets.add("Auth/security");
-    }
-    if (goal.contains("nullpointer")
-        || goal.contains("classnotfound")
-        || goal.contains("exception")
-        || goal.contains("error")) {
-      suggestedBuckets.add("App bug / NullPointer / ClassNotFound / config");
-    }
-
-    if (suggestedBuckets.isEmpty()) {
-      suggestedBuckets.add("App bug / NullPointer / ClassNotFound / config");
-    }
+    List<String> heuristicBuckets = buildHeuristicSuggestedBuckets(run.getGoal());
+    Map<String, Object> evidenceOutput = findOutputByToolName(run, "collect_log_evidence");
 
     Map<String, Object> output = new LinkedHashMap<>();
     output.put("goal", run.getGoal());
-    output.put("suggestedBuckets", suggestedBuckets);
+    output.put("suggestedBuckets", heuristicBuckets);
     output.put("confidenceHint", "medium");
+    output.put("engine", "supervised-heuristic-workflow");
     output.put(
         "note",
         "Classification is heuristic in Step 1. Use finding details and user approval before any remediation.");
+
+    if (!agentLlmService.isLlmSupervisionEnabled()) {
+      output.put("llmMode", "disabled");
+      return output;
+    }
+    if (!agentLlmService.isLlmSupervisionActive()) {
+      output.put("llmMode", "configured_without_key");
+      output.put(
+          "llmWarning",
+          "Agent LLM supervision is enabled but OPENAI_API_KEY is not available. Using heuristic classification.");
+      return output;
+    }
+
+    try {
+      Map<String, Object> llmResult =
+          agentLlmService.classifyIssueCandidates(run.getGoal(), evidenceOutput, heuristicBuckets);
+      List<String> llmBuckets = asStringList(llmResult.get("suggestedBuckets"));
+      if (!llmBuckets.isEmpty()) {
+        output.put("suggestedBuckets", llmBuckets);
+      }
+      output.put("confidenceHint", asString(llmResult.get("confidenceHint")));
+      output.put(
+          "note",
+          firstNonBlank(
+              asString(llmResult.get("note")),
+              "Classification drafted by LLM-supervised mode. Review evidence before remediation."));
+      output.put("engine", "llm-supervised");
+      output.put("llmMode", "active");
+      output.put("llmProvider", asString(llmResult.get("provider")));
+      output.put("llmModel", asString(llmResult.get("model")));
+    } catch (Exception ex) {
+      output.put("llmMode", "fallback");
+      output.put("llmWarning", safeMessage(ex.getMessage()));
+    }
     return output;
   }
 
@@ -568,6 +576,54 @@ public class AgentRunService {
               + " configured).";
     }
 
+    List<String> targetedActions = buildTargetedActions(primaryBucket);
+    List<String> targetedSuccessSignals = buildTargetedSuccessSignals(primaryBucket);
+    String planAuthoringMode = "supervised-heuristic-workflow";
+    String llmPlanNote = "";
+    String llmPlanWarning = "";
+
+    if (agentLlmService.isLlmSupervisionEnabled()) {
+      if (!agentLlmService.isLlmSupervisionActive()) {
+        llmPlanWarning =
+            "Agent LLM supervision is enabled but OPENAI_API_KEY is not available. Using heuristic plan text.";
+      } else {
+        try {
+          Map<String, Object> planHints =
+              agentLlmService.draftRemediationPlanHints(
+                  run.getGoal(),
+                  primaryBucket,
+                  suggestedBuckets,
+                  evidenceSummary,
+                  readableSamplePaths,
+                  unreadablePathHints);
+          String llmPrimaryCategory = asString(planHints.get("primaryCategory"));
+          if (!llmPrimaryCategory.isEmpty()) {
+            primaryBucket = llmPrimaryCategory;
+          }
+          List<String> llmActions = asStringList(planHints.get("targetedActions"));
+          if (!llmActions.isEmpty()) {
+            targetedActions = llmActions;
+          } else if (!llmPrimaryCategory.isEmpty()) {
+            targetedActions = buildTargetedActions(primaryBucket);
+          }
+          List<String> llmSignals = asStringList(planHints.get("successSignals"));
+          if (!llmSignals.isEmpty()) {
+            targetedSuccessSignals = llmSignals;
+          } else if (!llmPrimaryCategory.isEmpty()) {
+            targetedSuccessSignals = buildTargetedSuccessSignals(primaryBucket);
+          }
+          String llmEvidenceSummary = asString(planHints.get("evidenceSummary"));
+          if (!llmEvidenceSummary.isEmpty()) {
+            evidenceSummary = llmEvidenceSummary;
+          }
+          llmPlanNote = asString(planHints.get("operatorNote"));
+          planAuthoringMode = "llm-supervised";
+        } catch (Exception ex) {
+          llmPlanWarning = safeMessage(ex.getMessage());
+        }
+      }
+    }
+
     List<Map<String, Object>> options = new ArrayList<>();
     options.add(
         payload(
@@ -606,9 +662,9 @@ public class AgentRunService {
             "why",
             "Apply the smallest possible change aligned to the likely issue class.",
             "actions",
-            buildTargetedActions(primaryBucket),
+            targetedActions,
             "successSignals",
-            buildTargetedSuccessSignals(primaryBucket),
+            targetedSuccessSignals,
             "rollback",
             "Create explicit rollback steps and owner sign-off before applying any runtime/config/code change."));
 
@@ -644,6 +700,13 @@ public class AgentRunService {
     output.put("primaryCategory", primaryBucket);
     output.put("suggestedBuckets", suggestedBuckets);
     output.put("evidenceSummary", evidenceSummary);
+    output.put("planAuthoringMode", planAuthoringMode);
+    if (!llmPlanNote.isEmpty()) {
+      output.put("note", llmPlanNote);
+    }
+    if (!llmPlanWarning.isEmpty()) {
+      output.put("llmWarning", llmPlanWarning);
+    }
     output.put("options", options);
     output.put(
         "approvalChecklist",
@@ -666,6 +729,42 @@ public class AgentRunService {
         "executionPolicy",
         "Plan-only mode. Remediation execution requires explicit user approval and manual operator action.");
     return output;
+  }
+
+  private List<String> buildHeuristicSuggestedBuckets(String rawGoal) {
+    String goal = safeTrim(rawGoal).toLowerCase();
+    List<String> suggestedBuckets = new ArrayList<>();
+
+    if (goal.contains("db2") || goal.contains("sqlstate") || goal.contains("jdbc")) {
+      suggestedBuckets.add("DB2 / JDBC connectivity");
+    }
+    if (goal.contains("memory") || goal.contains("oom") || goal.contains("heap")) {
+      suggestedBuckets.add("JVM memory");
+    }
+    if (goal.contains("timeout") || goal.contains("latency") || goal.contains("downstream")) {
+      suggestedBuckets.add("Integration / outbound timeout");
+    }
+    if (goal.contains("ssl") || goal.contains("tls") || goal.contains("cert")) {
+      suggestedBuckets.add("SSL/TLS / certs");
+    }
+    if (goal.contains("401")
+        || goal.contains("403")
+        || goal.contains("auth")
+        || goal.contains("token")
+        || goal.contains("sso")) {
+      suggestedBuckets.add("Auth/security");
+    }
+    if (goal.contains("nullpointer")
+        || goal.contains("classnotfound")
+        || goal.contains("exception")
+        || goal.contains("error")) {
+      suggestedBuckets.add("App bug / NullPointer / ClassNotFound / config");
+    }
+
+    if (suggestedBuckets.isEmpty()) {
+      suggestedBuckets.add("App bug / NullPointer / ClassNotFound / config");
+    }
+    return suggestedBuckets;
   }
 
   private List<String> buildTargetedActions(String primaryBucket) {
@@ -1259,6 +1358,19 @@ public class AgentRunService {
 
   private String safeTrim(String value) {
     return value == null ? "" : value.trim();
+  }
+
+  private String firstNonBlank(String... values) {
+    if (values == null) {
+      return "";
+    }
+    for (String value : values) {
+      String normalized = safeTrim(value);
+      if (!normalized.isEmpty()) {
+        return normalized;
+      }
+    }
+    return "";
   }
 
   private String safeMessage(String value) {

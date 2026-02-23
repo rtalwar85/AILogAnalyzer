@@ -417,11 +417,38 @@
   gap: 0.35rem;
 }
 
+.agent-run-llm-status {
+  margin: 0.35rem 0 0;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
+.agent-step-llm-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.agent-step-llm-meta code {
+  font-size: 0.76rem;
+}
+
 .agent-step-details p {
   margin: 0;
   font-size: 0.84rem;
   color: #1f3d66;
   line-height: 1.38;
+}
+
+.agent-step-details p.agent-step-warning {
+  color: #7a4400;
+  background: #fff6e8;
+  border: 1px solid #f2d6aa;
+  border-radius: 8px;
+  padding: 0.35rem 0.45rem;
 }
 
 .agent-step-options {

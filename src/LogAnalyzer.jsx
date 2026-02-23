@@ -356,9 +356,109 @@ function normalizeAgentObjectList(value) {
   return value.filter((item) => item && typeof item === "object");
 }
 
+function deriveAgentStepLlmStatus(step) {
+  if (!step || !step.output || typeof step.output !== "object") return null;
+  const output = step.output;
+  const engine = String(output.engine || "").trim();
+  const planAuthoringMode = String(output.planAuthoringMode || "").trim();
+  const llmMode = String(output.llmMode || "")
+    .trim()
+    .toLowerCase();
+  const llmWarning = String(output.llmWarning || "").trim();
+  const llmProvider = String(output.llmProvider || "").trim();
+  const llmModel = String(output.llmModel || "").trim();
+  const effectiveEngine = planAuthoringMode || engine;
+  const usesLlm = llmMode === "active" || effectiveEngine === "llm-supervised";
+  const hasSignal =
+    Boolean(effectiveEngine) || Boolean(llmMode) || Boolean(llmWarning) || Boolean(llmProvider) || Boolean(llmModel);
+  if (!hasSignal) return null;
+
+  let badgeLabel = "Heuristic";
+  let badgeClassName = "is-local";
+  if (usesLlm) {
+    badgeLabel = "LLM-supervised";
+    badgeClassName = "is-llm";
+  } else if (llmMode === "configured_without_key" || llmMode === "fallback") {
+    badgeLabel = "Heuristic fallback";
+  } else if (llmMode === "disabled") {
+    badgeLabel = "Heuristic only";
+  }
+
+  return {
+    effectiveEngine,
+    planAuthoringMode,
+    llmMode,
+    llmWarning,
+    llmProvider,
+    llmModel,
+    usesLlm,
+    badgeLabel,
+    badgeClassName,
+  };
+}
+
+function summarizeAgentRunLlmStatus(steps) {
+  const statuses = (Array.isArray(steps) ? steps : []).map(deriveAgentStepLlmStatus).filter(Boolean);
+  if (!statuses.length) return null;
+
+  const sawLlm = statuses.some((item) => item.usesLlm);
+  const sawFallback = statuses.some((item) => item.llmMode === "fallback" || item.llmMode === "configured_without_key");
+  const sawDisabled = statuses.some((item) => item.llmMode === "disabled");
+  const sawHeuristicPlan = statuses.some((item) => item.planAuthoringMode === "supervised-heuristic-workflow");
+  const heuristicSignals = sawFallback || sawDisabled || sawHeuristicPlan;
+  const warning = statuses.find((item) => item.llmWarning)?.llmWarning || "";
+  const model = statuses.find((item) => item.usesLlm && item.llmModel)?.llmModel || "";
+  const provider = statuses.find((item) => item.usesLlm && item.llmProvider)?.llmProvider || "";
+
+  if (sawLlm && heuristicSignals) {
+    return {
+      badgeLabel: "Mixed (LLM + fallback)",
+      badgeClassName: "is-active",
+      detail: warning || "Some steps used heuristic fallback.",
+      model,
+      provider,
+    };
+  }
+  if (sawLlm) {
+    return {
+      badgeLabel: "LLM-supervised",
+      badgeClassName: "is-llm",
+      detail: "",
+      model,
+      provider,
+    };
+  }
+  if (sawFallback) {
+    return {
+      badgeLabel: "Heuristic fallback",
+      badgeClassName: "is-local",
+      detail: warning,
+      model: "",
+      provider: "",
+    };
+  }
+  if (sawDisabled) {
+    return {
+      badgeLabel: "Heuristic only",
+      badgeClassName: "is-local",
+      detail: warning,
+      model: "",
+      provider: "",
+    };
+  }
+  return {
+    badgeLabel: "Heuristic",
+    badgeClassName: "is-local",
+    detail: warning,
+    model: "",
+    provider: "",
+  };
+}
+
 function buildAgentStepDetailModel(step) {
   if (!step || !step.output || typeof step.output !== "object") return null;
   const output = step.output;
+  const llmStatus = deriveAgentStepLlmStatus(step);
   const primaryCategory = String(output.primaryCategory || "").trim();
   const targetHost = String(output.targetHost || "").trim();
   const evidenceSummary = String(output.evidenceSummary || "").trim();
@@ -404,9 +504,11 @@ function buildAgentStepDetailModel(step) {
     approvalChecklist.length > 0 ||
     blockedActions.length > 0 ||
     unreadablePathHints.length > 0 ||
-    executedActions.length > 0;
+    executedActions.length > 0 ||
+    Boolean(llmStatus);
   if (!hasDetail) return null;
   return {
+    llmStatus,
     primaryCategory,
     targetHost,
     evidenceSummary,
@@ -1523,6 +1625,10 @@ export default function LogAnalyzer() {
   const activeAgentSteps = useMemo(
     () => (Array.isArray(agentRun?.steps) ? agentRun.steps : []),
     [agentRun]
+  );
+  const activeAgentRunLlmStatus = useMemo(
+    () => summarizeAgentRunLlmStatus(activeAgentSteps),
+    [activeAgentSteps]
   );
   const recentAgentEvents = useMemo(
     () => (Array.isArray(agentEvents) ? [...agentEvents].slice(-40).reverse() : []),
@@ -3059,6 +3165,18 @@ export default function LogAnalyzer() {
                   </p>
                   {agentRun.summary ? <p className="agent-run-summary">{agentRun.summary}</p> : null}
                   <p className="muted agent-run-summary">Confidence: {agentRun.confidence ?? "n/a"}</p>
+                  {activeAgentRunLlmStatus ? (
+                    <p className="agent-run-llm-status">
+                      <span className={`agent-ai-badge ${activeAgentRunLlmStatus.badgeClassName}`}>
+                        {activeAgentRunLlmStatus.badgeLabel}
+                      </span>
+                      {activeAgentRunLlmStatus.provider ? <span>{activeAgentRunLlmStatus.provider}</span> : null}
+                      {activeAgentRunLlmStatus.model ? <code>{activeAgentRunLlmStatus.model}</code> : null}
+                      {activeAgentRunLlmStatus.detail ? (
+                        <span className="muted">{activeAgentRunLlmStatus.detail}</span>
+                      ) : null}
+                    </p>
+                  ) : null}
 
                   <div className="agent-grid">
                     <section className="agent-steps">
@@ -3080,6 +3198,27 @@ export default function LogAnalyzer() {
                             {step.summary ? <p>{step.summary}</p> : null}
                             {stepDetails ? (
                               <div className="agent-step-details">
+                                {stepDetails.llmStatus ? (
+                                  <>
+                                    <div className="agent-step-llm-meta">
+                                      <span className={`agent-ai-badge ${stepDetails.llmStatus.badgeClassName}`}>
+                                        {stepDetails.llmStatus.badgeLabel}
+                                      </span>
+                                      {stepDetails.llmStatus.llmProvider ? (
+                                        <span>{stepDetails.llmStatus.llmProvider}</span>
+                                      ) : null}
+                                      {stepDetails.llmStatus.llmModel ? (
+                                        <code>{stepDetails.llmStatus.llmModel}</code>
+                                      ) : null}
+                                      {stepDetails.llmStatus.effectiveEngine ? (
+                                        <code>{stepDetails.llmStatus.effectiveEngine}</code>
+                                      ) : null}
+                                    </div>
+                                    {stepDetails.llmStatus.llmWarning ? (
+                                      <p className="agent-step-warning">{stepDetails.llmStatus.llmWarning}</p>
+                                    ) : null}
+                                  </>
+                                ) : null}
                                 {stepDetails.primaryCategory ? (
                                   <p>
                                     <strong>Primary category:</strong> {stepDetails.primaryCategory}

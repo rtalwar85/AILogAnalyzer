@@ -25,6 +25,7 @@ public class AnalyzerSettings {
   public static final String DEFAULT_HUGGINGFACE_MODEL = "Qwen/Qwen2.5-7B-Instruct";
   public static final String DEFAULT_GROQ_FREE_MODEL = "llama-3.1-8b-instant";
   public static final String DEFAULT_OPENROUTER_FREE_MODEL = "meta-llama/llama-3.2-3b-instruct:free";
+  public static final String DEFAULT_AGENT_LLM_MODEL = "gpt-4o-mini";
 
   private final List<Path> allowedRoots;
   private final boolean allowAnyPath;
@@ -57,6 +58,8 @@ public class AnalyzerSettings {
   private final String openRouterApiKey;
   private final String openAiApiKey;
   private final String githubToken;
+  private final boolean agentLlmEnabled;
+  private final String agentLlmModel;
   private final String geminiFreeModel;
   private final String huggingFaceModel;
   private final String groqFreeModel;
@@ -132,6 +135,8 @@ public class AnalyzerSettings {
     this.openAiApiKey =
         firstNonBlank(readFirst("OPENAI_API_KEY"), readFirst("VITE_OPENAI_API_KEY"), "");
     this.githubToken = readFirst("GITHUB_TOKEN");
+    this.agentLlmEnabled = !"false".equalsIgnoreCase(readFirst("AGENT_LLM_ENABLED"));
+    this.agentLlmModel = firstNonBlank(readFirst("AGENT_LLM_MODEL"), DEFAULT_AGENT_LLM_MODEL);
     this.geminiFreeModel =
         firstNonBlank(readFirst("LOG_GEMINI_FREE_MODEL"), DEFAULT_GEMINI_FREE_MODEL);
     this.huggingFaceModel =
@@ -413,6 +418,14 @@ public class AnalyzerSettings {
 
   public String getGithubToken() {
     return githubToken;
+  }
+
+  public boolean isAgentLlmEnabled() {
+    return agentLlmEnabled;
+  }
+
+  public String getAgentLlmModel() {
+    return agentLlmModel;
   }
 
   public String getGoogleApiKey() {

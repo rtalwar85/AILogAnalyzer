@@ -73,11 +73,24 @@ public class WebSolutionsService {
 
   public Map<String, Object> getAiCapabilities() {
     Map<String, Object> agentMode = new LinkedHashMap<>();
-    agentMode.put("engine", "supervised-heuristic-workflow");
-    agentMode.put("usesLlm", false);
-    agentMode.put(
-        "summary",
-        "Agent Console is a supervised workflow engine (log read + heuristic classification + approval-gated remediation planning).");
+    boolean agentLlmEnabled = settings.isAgentLlmEnabled();
+    boolean agentLlmActive = agentLlmEnabled && hasText(settings.getOpenAiApiKey());
+    agentMode.put("engine", agentLlmEnabled ? "llm-supervised" : "supervised-heuristic-workflow");
+    agentMode.put("usesLlm", agentLlmActive);
+    agentMode.put("model", agentLlmEnabled ? settings.getAgentLlmModel() : "");
+    if (agentLlmActive) {
+      agentMode.put(
+          "summary",
+          "Agent Console uses LLM-supervised classification and remediation plan drafting; execution remains approval-gated and controlled.");
+    } else if (agentLlmEnabled) {
+      agentMode.put(
+          "summary",
+          "Agent Console is configured for LLM-supervised mode, but no backend OPENAI_API_KEY is available, so it will fall back to heuristic planning.");
+    } else {
+      agentMode.put(
+          "summary",
+          "Agent Console is a supervised workflow engine (log read + heuristic classification + approval-gated remediation planning).");
+    }
 
     List<Map<String, Object>> providers = new ArrayList<>();
     providers.add(
