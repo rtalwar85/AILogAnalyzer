@@ -183,6 +183,135 @@
   padding: 0.6rem;
 }
 
+.agent-ai-runtime-panel {
+  margin-top: 0.7rem;
+  border: 1px solid #dbe7fb;
+  border-radius: 11px;
+  background: #ffffff;
+  padding: 0.65rem;
+}
+
+.agent-ai-runtime-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.55rem;
+}
+
+.agent-ai-runtime-card {
+  border: 1px solid #e2ebfb;
+  border-radius: 10px;
+  background: #f9fbff;
+  padding: 0.55rem;
+}
+
+.agent-ai-runtime-card h4 {
+  margin: 0;
+  font-size: 0.88rem;
+}
+
+.agent-ai-runtime-card p {
+  margin: 0.28rem 0 0;
+}
+
+.agent-ai-runtime-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.agent-ai-runtime-detail {
+  display: block;
+  margin-top: 0.2rem;
+  word-break: break-word;
+}
+
+.agent-ai-provider-list {
+  margin-top: 0.6rem;
+  display: grid;
+  gap: 0.45rem;
+  max-height: 260px;
+  overflow: auto;
+}
+
+.agent-ai-provider-item {
+  border: 1px solid #e2ebfb;
+  border-radius: 10px;
+  background: #fbfdff;
+  padding: 0.5rem 0.55rem;
+}
+
+.agent-ai-provider-item.is-active {
+  border-color: #c8dcff;
+  background: #f6faff;
+}
+
+.agent-ai-provider-main {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.55rem;
+}
+
+.agent-ai-provider-main strong {
+  font-size: 0.88rem;
+}
+
+.agent-ai-provider-badges {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.agent-ai-provider-meta {
+  margin-top: 0.25rem;
+  display: grid;
+  gap: 0.15rem;
+}
+
+.agent-ai-provider-meta code {
+  width: fit-content;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.agent-ai-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  border: 1px solid #cfdcf5;
+  background: #edf3ff;
+  color: #174074;
+  padding: 0.08rem 0.45rem;
+  font-size: 0.72rem;
+  line-height: 1.2;
+}
+
+.agent-ai-badge.is-active {
+  border-color: #8fb2f0;
+  background: #dfeaff;
+}
+
+.agent-ai-badge.is-llm {
+  border-color: #a3c5eb;
+  background: #e9f4ff;
+  color: #0f4a78;
+}
+
+.agent-ai-badge.is-local {
+  border-color: #bcdcc8;
+  background: #edf9f1;
+  color: #1e5e34;
+}
+
+.agent-ai-badge.is-cred {
+  border-color: #d8c7ef;
+  background: #f3ecff;
+  color: #51337f;
+}
+
 .agent-action-mode-header {
   display: flex;
   align-items: center;

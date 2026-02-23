@@ -71,6 +71,130 @@ public class WebSolutionsService {
     this.httpClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(12)).build();
   }
 
+  public Map<String, Object> getAiCapabilities() {
+    Map<String, Object> agentMode = new LinkedHashMap<>();
+    agentMode.put("engine", "supervised-heuristic-workflow");
+    agentMode.put("usesLlm", false);
+    agentMode.put(
+        "summary",
+        "Agent Console is a supervised workflow engine (log read + heuristic classification + approval-gated remediation planning).");
+
+    List<Map<String, Object>> providers = new ArrayList<>();
+    providers.add(
+        providerCapability(
+            "localai",
+            "Local AI Engine",
+            true,
+            true,
+            false,
+            "",
+            false,
+            "Heuristic local suggestions (no external LLM call)."));
+    providers.add(
+        providerCapability(
+            "google",
+            "Google Search",
+            settings.isEnableGoogleSearch(),
+            settings.isEnableGoogleSearch(),
+            false,
+            "",
+            hasText(settings.getGoogleApiKey()) && hasText(settings.getGoogleCseCx()),
+            hasText(settings.getGoogleApiKey()) && hasText(settings.getGoogleCseCx())
+                ? "Uses Google Custom Search API when key + CX are configured."
+                : "Falls back to generated Google search links if API key/CX are not configured."));
+    providers.add(
+        providerCapability(
+            "gemini",
+            "Gemini (Free Tier)",
+            settings.isEnableGeminiFreeSearch(),
+            settings.isEnableGeminiFreeSearch() && hasText(settings.getGeminiApiKey()),
+            true,
+            settings.getGeminiFreeModel(),
+            hasText(settings.getGeminiApiKey()),
+            "Requires GEMINI_API_KEY."));
+    providers.add(
+        providerCapability(
+            "huggingface",
+            "Hugging Face",
+            settings.isEnableHuggingFaceSearch(),
+            settings.isEnableHuggingFaceSearch() && hasText(settings.getHuggingFaceApiKey()),
+            true,
+            settings.getHuggingFaceModel(),
+            hasText(settings.getHuggingFaceApiKey()),
+            "Uses Hugging Face router chat-completions API."));
+    providers.add(
+        providerCapability(
+            "groq",
+            "Groq (Free Tier)",
+            settings.isEnableGroqFreeSearch(),
+            settings.isEnableGroqFreeSearch() && hasText(settings.getGroqApiKey()),
+            true,
+            settings.getGroqFreeModel(),
+            hasText(settings.getGroqApiKey()),
+            "Requires GROQ_API_KEY."));
+    providers.add(
+        providerCapability(
+            "openrouter",
+            "OpenRouter Free",
+            settings.isEnableOpenRouterFreeSearch(),
+            settings.isEnableOpenRouterFreeSearch() && hasText(settings.getOpenRouterApiKey()),
+            true,
+            settings.getOpenRouterFreeModel(),
+            hasText(settings.getOpenRouterApiKey()),
+            "Requires OPENROUTER_API_KEY."));
+    providers.add(
+        providerCapability(
+            "stackoverflow",
+            "Stack Overflow",
+            true,
+            true,
+            false,
+            "",
+            false,
+            "Uses Stack Exchange public API (no LLM)."));
+    providers.add(
+        providerCapability(
+            "github",
+            "GitHub Issues",
+            settings.isEnableGithubIssueSearch(),
+            settings.isEnableGithubIssueSearch(),
+            false,
+            "",
+            hasText(settings.getGithubToken()),
+            hasText(settings.getGithubToken())
+                ? "GitHub token configured."
+                : "Works without token but may be rate-limited."));
+    providers.add(
+        providerCapability(
+            "chatgpt",
+            "ChatGPT Web Search",
+            settings.isEnableChatgptWebSearch(),
+            settings.isEnableChatgptWebSearch() && hasText(settings.getOpenAiApiKey()),
+            true,
+            settings.getChatgptWebSearchModel(),
+            hasText(settings.getOpenAiApiKey()),
+            "Uses OpenAI Responses API with web_search tool; requires LOG_ENABLE_CHATGPT_WEB_SEARCH=true and OPENAI_API_KEY."));
+    providers.add(
+        providerCapability(
+            "local",
+            "Local Fallback",
+            true,
+            true,
+            false,
+            "",
+            false,
+            "Non-LLM fallback guidance used when no web providers return results."));
+
+    Map<String, Object> webSolutions = new LinkedHashMap<>();
+    webSolutions.put("limit", settings.getWebSolutionLimit());
+    webSolutions.put("providers", providers);
+
+    Map<String, Object> output = new LinkedHashMap<>();
+    output.put("agentMode", agentMode);
+    output.put("webSolutions", webSolutions);
+    return output;
+  }
+
   public WebSolutionResponse findSolutions(
       Map<String, Object> finding, Integer requestedLimit, List<String> requestedSourcePriority) {
     int limit =
@@ -234,6 +358,27 @@ public class WebSolutionsService {
 
     String warning = warnings.stream().filter(WebSolutionsService::hasText).collect(Collectors.joining(" "));
     return new WebSolutionResponse(query, warning, solutions);
+  }
+
+  private Map<String, Object> providerCapability(
+      String id,
+      String label,
+      boolean enabled,
+      boolean active,
+      boolean usesLlm,
+      String model,
+      boolean credentialConfigured,
+      String note) {
+    Map<String, Object> item = new LinkedHashMap<>();
+    item.put("id", id);
+    item.put("label", label);
+    item.put("enabled", enabled);
+    item.put("active", active);
+    item.put("usesLlm", usesLlm);
+    item.put("model", hasText(model) ? model.trim() : "");
+    item.put("credentialConfigured", credentialConfigured);
+    item.put("note", hasText(note) ? note.trim() : "");
+    return item;
   }
 
   private List<String> normalizeSourcePriority(List<String> requestedSourcePriority) {

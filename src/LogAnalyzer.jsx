@@ -5,6 +5,7 @@ const MAX_FILES = 30;
 const SEARCH_MAX_RESULTS = 500;
 const PATH_HISTORY_LIMIT = 30;
 const WEB_SOLUTION_LIMIT = 5;
+const MULTI_SOURCE_PATH = "__multiple_sources__";
 const WEB_SOURCE_OPTIONS = [
   { id: "localai", label: "Local AI Engine" },
   { id: "google", label: "Google Links" },
@@ -285,6 +286,17 @@ const DEFAULT_AGENT_CAPABILITIES = {
   },
   policyNotice: "Privileged action mode is disabled in backend configuration.",
 };
+const DEFAULT_AI_RUNTIME_CAPABILITIES = {
+  agentMode: {
+    engine: "supervised-heuristic-workflow",
+    usesLlm: false,
+    summary: "Agent Console runs a supervised heuristic workflow (not an external LLM).",
+  },
+  webSolutions: {
+    limit: 0,
+    providers: [],
+  },
+};
 
 function safeReadStorage(key, fallback) {
   if (typeof window === "undefined") return fallback;
@@ -424,6 +436,81 @@ function normalizeAgentCapabilities(payload) {
   };
 }
 
+function normalizeAiProviderCapability(item, index) {
+  const source = item && typeof item === "object" ? item : {};
+  return {
+    id: String(source.id || `provider_${index + 1}`).trim(),
+    label: String(source.label || `Provider ${index + 1}`).trim(),
+    enabled: Boolean(source.enabled),
+    active: Boolean(source.active),
+    usesLlm: Boolean(source.usesLlm),
+    model: String(source.model || "").trim(),
+    credentialConfigured: Boolean(source.credentialConfigured),
+    note: String(source.note || "").trim(),
+  };
+}
+
+function normalizeAiRuntimeCapabilities(payload) {
+  const source = payload && typeof payload === "object" ? payload : {};
+  const agentModeSource =
+    source.agentMode && typeof source.agentMode === "object" ? source.agentMode : {};
+  const webSolutionsSource =
+    source.webSolutions && typeof source.webSolutions === "object" ? source.webSolutions : {};
+
+  return {
+    agentMode: {
+      engine:
+        String(agentModeSource.engine || DEFAULT_AI_RUNTIME_CAPABILITIES.agentMode.engine).trim() ||
+        DEFAULT_AI_RUNTIME_CAPABILITIES.agentMode.engine,
+      usesLlm:
+        agentModeSource.usesLlm === undefined
+          ? DEFAULT_AI_RUNTIME_CAPABILITIES.agentMode.usesLlm
+          : Boolean(agentModeSource.usesLlm),
+      summary:
+        String(agentModeSource.summary || DEFAULT_AI_RUNTIME_CAPABILITIES.agentMode.summary).trim() ||
+        DEFAULT_AI_RUNTIME_CAPABILITIES.agentMode.summary,
+    },
+    webSolutions: {
+      limit: Number(webSolutionsSource.limit || 0),
+      providers: Array.isArray(webSolutionsSource.providers)
+        ? webSolutionsSource.providers.map(normalizeAiProviderCapability)
+        : [],
+    },
+  };
+}
+
+function getFrontendAiSummaryStatus() {
+  const customEndpoint = String(import.meta.env.VITE_LOG_ANALYZER_ENDPOINT || "").trim();
+  const browserOpenAiKey = String(import.meta.env.VITE_OPENAI_API_KEY || "").trim();
+
+  if (customEndpoint) {
+    return {
+      enabled: true,
+      mode: "Custom AI endpoint",
+      provider: "Custom",
+      model: "",
+      detail: customEndpoint,
+    };
+  }
+  if (browserOpenAiKey) {
+    return {
+      enabled: true,
+      mode: "Backend AI endpoint (default) + browser fallback",
+      provider: "Backend / OpenAI",
+      model: "gpt-4o-mini",
+      detail:
+        "Default same-origin endpoint `/api/ai-summary` is tried first; browser OpenAI fallback is available if backend endpoint is unavailable.",
+    };
+  }
+  return {
+    enabled: true,
+    mode: "Backend AI endpoint (default)",
+    provider: "Backend",
+    model: "gpt-4o-mini",
+    detail: "Uses same-origin `/api/ai-summary` (server-side OpenAI or local fallback).",
+  };
+}
+
 function normalizeBooleanFlag(value) {
   if (typeof value === "boolean") return value;
   const normalized = String(value ?? "")
@@ -522,12 +609,13 @@ function sourceNameFromPath(sourcePath) {
 
 function displaySourcePath(sourcePath) {
   const normalized = normalizePathInput(sourcePath);
+  if (normalized === MULTI_SOURCE_PATH) return "multiple-files";
   return normalized === "manual-input" || !normalized ? "manual-input" : normalized;
 }
 
 function displayCompactPath(sourcePath) {
   const fullPath = displaySourcePath(sourcePath);
-  if (fullPath === "manual-input") return fullPath;
+  if (fullPath === "manual-input" || fullPath === "multiple-files") return fullPath;
   const fileName = sourceNameFromPath(fullPath);
   const prefix = fullPath.slice(0, 15);
   return `${prefix}...${fileName}`;
@@ -536,6 +624,7 @@ function displayCompactPath(sourcePath) {
 function isLikelyFileSystemPath(sourcePath) {
   const normalized = normalizePathInput(sourcePath);
   if (!normalized) return false;
+  if (normalized === MULTI_SOURCE_PATH) return false;
   if (normalized.startsWith("\\\\")) return true;
   if (normalized.startsWith("/")) return true;
   if (/^[A-Za-z]:[\\/]/.test(normalized)) return true;
@@ -761,6 +850,46 @@ function groupEntriesBySource(entries) {
   return [...grouped.values()];
 }
 
+function createAggregatedSourceState() {
+  return {
+    sourcePath: "manual-input",
+    sourceName: "manual-input",
+    sourcePaths: [],
+    sourceNames: [],
+  };
+}
+
+function addEntrySourceToFinding(target, entry) {
+  const sourcePath = entry.sourcePath || "manual-input";
+  const sourceName = entry.sourceName || sourceNameFromPath(sourcePath);
+
+  if (!Array.isArray(target.sourcePaths)) target.sourcePaths = [];
+  if (!Array.isArray(target.sourceNames)) target.sourceNames = [];
+
+  if (!target.sourcePaths.includes(sourcePath)) {
+    target.sourcePaths.push(sourcePath);
+  }
+  if (!target.sourceNames.includes(sourceName)) {
+    target.sourceNames.push(sourceName);
+  }
+
+  if (target.sourcePaths.length === 1) {
+    target.sourcePath = sourcePath;
+    target.sourceName = sourceName;
+    return;
+  }
+
+  target.sourcePath = MULTI_SOURCE_PATH;
+  target.sourceName = `Multiple files (${target.sourcePaths.length})`;
+}
+
+function addGroupSourceToFinding(target, group) {
+  addEntrySourceToFinding(target, {
+    sourcePath: group.sourcePath,
+    sourceName: group.sourceName,
+  });
+}
+
 function findingFingerprint(finding) {
   const sample = finding.evidence?.[0] || finding.title || finding.id;
   return `${finding.id}::${normalizeLine(sample).slice(0, 140)}`;
@@ -804,12 +933,26 @@ function normalizeForSimilarity(line) {
         " "
       )
       .replace(/\b\d{1,3}(?:\.\d{1,3}){3}\b/g, "<ip>")
+      .replace(/\s[<>]\s/g, " <dir> ")
+      .replace(/(^|[\s:])-[0-9a-f]{3,8}\b/gi, "$1-<id>")
       .replace(/\b0x[0-9a-f]+\b/gi, "<hex>")
       .replace(/\b[0-9a-f]{8,}\b/gi, "<id>")
       .replace(/\b\d+\b/g, "<n>")
       .replace(/"[^"]*"/g, "<str>")
       .replace(/'[^']*'/g, "<str>")
   ).slice(0, 180);
+}
+
+function compactSimilaritySignature(signature) {
+  return String(signature || "")
+    .replace(/<(n|id|ip|hex|str|dir)>/g, "*")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function similarityCategoryKey(signature) {
+  const compact = compactSimilaritySignature(signature);
+  return compact.length > 85 ? `${compact.slice(0, 82)}...` : compact;
 }
 
 function isProblemLikeLine(line) {
@@ -820,7 +963,7 @@ function isProblemLikeLine(line) {
 
 function formatSimilarityLabel(signature) {
   if (!signature) return "Similar issue pattern";
-  const compact = signature.replace(/<(n|id|ip|hex|str)>/g, "*");
+  const compact = compactSimilaritySignature(signature);
   const clipped = compact.length > 85 ? `${compact.slice(0, 82)}...` : compact;
   return `Similar: ${clipped}`;
 }
@@ -917,21 +1060,26 @@ function buildLearnedFindings(entries, learnedScenarios) {
     if (!matches.length) continue;
 
     const groupedMatches = groupEntriesBySource(matches);
+    const categoryLabel = `Learned: ${scenario.title}`;
+    const mergedFinding = {
+      id: `learned-${scenario.fingerprint}`,
+      categoryKey: `learned-${scenario.fingerprint}`,
+      categoryLabel,
+      title: categoryLabel,
+      ...createAggregatedSourceState(),
+      severity: scenario.severity || "medium",
+      count: 0,
+      evidence: [],
+      resolution: scenario.resolution || "Previously confirmed issue pattern.",
+    };
+
     groupedMatches.forEach((group) => {
-      const categoryLabel = `Learned: ${scenario.title}`;
-      findings.push({
-        id: `learned-${scenario.fingerprint}::${group.sourcePath}`,
-        categoryKey: `learned-${scenario.fingerprint}`,
-        categoryLabel,
-        title: `${group.sourceName} - ${categoryLabel}`,
-        sourcePath: group.sourcePath,
-        sourceName: group.sourceName,
-        severity: scenario.severity || "medium",
-        count: group.lines.length,
-        evidence: group.lines,
-        resolution: scenario.resolution || "Previously confirmed issue pattern.",
-      });
+      addGroupSourceToFinding(mergedFinding, group);
+      mergedFinding.count += group.lines.length;
+      mergedFinding.evidence.push(...group.lines);
     });
+
+    findings.push(mergedFinding);
   }
 
   return findings;
@@ -966,19 +1114,17 @@ function analyzeWithRules(entries, learnedScenarios) {
 
     const categoryKey = exceptionName
       ? `exception:${exceptionName.toLowerCase()}`
-      : `similar:${similarity}`;
+      : `similar:${similarityCategoryKey(similarity)}`;
     const categoryLabel = exceptionName ? exceptionName : formatSimilarityLabel(similarity);
-    const sourcePath = entry.sourcePath || "manual-input";
-    const groupKey = `${sourcePath}::${categoryKey}`;
+    const groupKey = categoryKey;
 
     if (!grouped.has(groupKey)) {
       grouped.set(groupKey, {
         id: groupKey,
         categoryKey,
         categoryLabel,
-        title: `${entry.sourceName} - ${categoryLabel}`,
-        sourcePath,
-        sourceName: entry.sourceName || sourceNameFromPath(sourcePath),
+        title: categoryLabel,
+        ...createAggregatedSourceState(),
         severity: "low",
         count: 0,
         evidence: [],
@@ -988,6 +1134,7 @@ function analyzeWithRules(entries, learnedScenarios) {
     }
 
     const current = grouped.get(groupKey);
+    addEntrySourceToFinding(current, entry);
     current.evidence.push(entry.line);
     current.count += 1;
   }
@@ -1005,21 +1152,28 @@ function analyzeWithRules(entries, learnedScenarios) {
 
   if (!findings.length) {
     const fallbackBySource = groupEntriesBySource(entries);
+    const mergedFallback = {
+      id: "generic-error",
+      categoryKey: "generic-error",
+      categoryLabel: "Generic runtime issue",
+      title: "Generic runtime issue",
+      ...createAggregatedSourceState(),
+      severity: "low",
+      count: 0,
+      evidence: [],
+      resolution:
+        "Capture larger error windows and include correlation IDs to improve exception-level grouping.",
+    };
+
     fallbackBySource.forEach((group) => {
-      findings.push({
-        id: `generic-error::${group.sourcePath}`,
-        categoryKey: "generic-error",
-        categoryLabel: "Generic runtime issue",
-        title: `${group.sourceName} - Generic runtime issue`,
-        sourcePath: group.sourcePath,
-        sourceName: group.sourceName,
-        severity: "low",
-        count: group.lines.length,
-        evidence: group.lines,
-        resolution:
-          "Capture larger error windows and include correlation IDs to improve exception-level grouping.",
-      });
+      addGroupSourceToFinding(mergedFallback, group);
+      mergedFallback.count += group.lines.length;
+      mergedFallback.evidence.push(...group.lines);
     });
+
+    if (mergedFallback.count > 0) {
+      findings.push(mergedFallback);
+    }
   }
 
   const learnedFindings = buildLearnedFindings(entries, learnedScenarios);
@@ -1089,9 +1243,9 @@ function applyDateTimeFilter(entries, filters) {
 }
 
 async function analyzeWithAI(rawLogs, findings) {
-  const endpoint = import.meta.env.VITE_LOG_ANALYZER_ENDPOINT;
-  if (endpoint) {
-    const response = await fetch(endpoint, {
+  const explicitEndpoint = String(import.meta.env.VITE_LOG_ANALYZER_ENDPOINT || "").trim();
+  if (explicitEndpoint) {
+    const response = await fetch(explicitEndpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ logs: rawLogs, findings }),
@@ -1100,6 +1254,19 @@ async function analyzeWithAI(rawLogs, findings) {
       throw new Error("AI endpoint request failed.");
     }
     return response.json();
+  }
+
+  try {
+    const backendResponse = await fetch("/api/ai-summary", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ logs: rawLogs, findings }),
+    });
+    if (backendResponse.ok) {
+      return backendResponse.json();
+    }
+  } catch {
+    // ignore backend endpoint errors and try browser-side fallback when configured
   }
 
   const openAiKey = import.meta.env.VITE_OPENAI_API_KEY;
@@ -1160,10 +1327,26 @@ async function fetchLogsFromPath(path) {
   const contentType = response.headers.get("content-type") || "";
   if (contentType.includes("application/json")) {
     const json = await response.json();
-    return String(json.logs || json.content || "");
+    const content = String(json.logs || json.content || "");
+    const files = Array.isArray(json.files) ? json.files.filter(Boolean) : [];
+    const mode = typeof json.mode === "string" ? json.mode : "";
+    const fileCount =
+      files.length || (content.trim() ? (mode === "directory" ? 0 : 1) : 0);
+    return {
+      content,
+      mode,
+      files,
+      fileCount,
+    };
   }
 
-  return response.text();
+  const text = await response.text();
+  return {
+    content: text,
+    mode: "file",
+    files: normalizedPath ? [normalizedPath] : [],
+    fileCount: text.trim() ? 1 : 0,
+  };
 }
 
 function readFileAsText(file) {
@@ -1201,6 +1384,7 @@ export default function LogAnalyzer() {
   const [agentError, setAgentError] = useState("");
   const [agentDecisionBusyByStep, setAgentDecisionBusyByStep] = useState({});
   const [agentCapabilities, setAgentCapabilities] = useState(DEFAULT_AGENT_CAPABILITIES);
+  const [aiRuntimeCapabilities, setAiRuntimeCapabilities] = useState(DEFAULT_AI_RUNTIME_CAPABILITIES);
   const [agentActionMode, setAgentActionMode] = useState(false);
   const [agentActionConfirmation, setAgentActionConfirmation] = useState("");
   const [agentActionBusyType, setAgentActionBusyType] = useState("");
@@ -1221,6 +1405,7 @@ export default function LogAnalyzer() {
   const [pathListInput, setPathListInput] = useState("");
   const [autoRead, setAutoRead] = useState(initialSearchPreferences.autoRead);
   const [pollSeconds, setPollSeconds] = useState(initialSearchPreferences.pollSeconds);
+  const frontendAiSummaryStatus = useMemo(() => getFrontendAiSummaryStatus(), []);
   const [lastReadAt, setLastReadAt] = useState("");
   const [lastReadTime, setLastReadTime] = useState(null);
   const [selectedFindingKey, setSelectedFindingKey] = useState("");
@@ -1627,7 +1812,7 @@ export default function LogAnalyzer() {
         setLogs(readResult.mergedLogs);
         setLastReadAt(new Date().toLocaleString());
         setLastReadTime(Date.now());
-        setError(readResult.failures ? `Read ${readResult.successes}/${parsedPaths.length} paths.` : "");
+        setError(buildConfiguredPathReadStatus(readResult, parsedPaths.length));
 
         try {
           await analyzeLogs(readResult.mergedLogs, false);
@@ -1716,6 +1901,16 @@ export default function LogAnalyzer() {
   }, [findings]);
 
   const lastReadRelativeLabel = useMemo(() => formatRelativeTime(lastReadTime), [lastReadTime]);
+  const aiRuntimeProviderRows = useMemo(
+    () => (Array.isArray(aiRuntimeCapabilities?.webSolutions?.providers) ? aiRuntimeCapabilities.webSolutions.providers : []),
+    [aiRuntimeCapabilities]
+  );
+  const aiRuntimeProviderSummary = useMemo(() => {
+    const total = aiRuntimeProviderRows.length;
+    const active = aiRuntimeProviderRows.filter((item) => item.active).length;
+    const llmActive = aiRuntimeProviderRows.filter((item) => item.active && item.usesLlm).length;
+    return { total, active, llmActive };
+  }, [aiRuntimeProviderRows]);
 
   const findingRows = useMemo(
     () =>
@@ -1932,6 +2127,19 @@ export default function LogAnalyzer() {
     }
   }, []);
 
+  const refreshAiRuntimeCapabilities = useCallback(async () => {
+    try {
+      const response = await fetch("/api/ai/capabilities", { method: "GET" });
+      if (!response.ok) {
+        throw new Error(await extractApiErrorMessage(response, "Failed loading AI capabilities."));
+      }
+      const payload = await response.json();
+      setAiRuntimeCapabilities(normalizeAiRuntimeCapabilities(payload));
+    } catch {
+      setAiRuntimeCapabilities(DEFAULT_AI_RUNTIME_CAPABILITIES);
+    }
+  }, []);
+
   const refreshAgentRun = useCallback(async (runId, options = {}) => {
     const normalizedRunId = String(runId || "").trim();
     if (!normalizedRunId) return;
@@ -1962,6 +2170,11 @@ export default function LogAnalyzer() {
     if (!agentMode) return;
     void refreshAgentCapabilities();
   }, [agentMode, refreshAgentCapabilities]);
+
+  useEffect(() => {
+    if (!agentMode) return;
+    void refreshAiRuntimeCapabilities();
+  }, [agentMode, refreshAiRuntimeCapabilities]);
 
   async function startAgentRun() {
     const goalValue = agentGoal.trim();
@@ -2273,9 +2486,44 @@ export default function LogAnalyzer() {
   }
 
   async function readConfiguredPathsOnce(paths) {
+    function summarizeReadSuccesses(successes) {
+      let directoryPathsRead = 0;
+      let directoryFilesRead = 0;
+      let sharedDirectoryPathsRead = 0;
+      let sharedDirectoryFilesRead = 0;
+
+      for (const item of successes) {
+        const payload = item?.payload || {};
+        const mode = payload.mode || "";
+        if (mode !== "directory") continue;
+
+        const fileCount = Number.isFinite(payload.fileCount)
+          ? Math.max(0, Number(payload.fileCount))
+          : Array.isArray(payload.files)
+            ? payload.files.length
+            : 0;
+
+        directoryPathsRead += 1;
+        directoryFilesRead += fileCount;
+
+        const sourcePath = normalizePathInput(item?.path);
+        if (sourcePath.startsWith("\\\\")) {
+          sharedDirectoryPathsRead += 1;
+          sharedDirectoryFilesRead += fileCount;
+        }
+      }
+
+      return {
+        directoryPathsRead,
+        directoryFilesRead,
+        sharedDirectoryPathsRead,
+        sharedDirectoryFilesRead,
+      };
+    }
+
     async function readMany(targetPaths) {
       const settled = await Promise.allSettled(
-        targetPaths.map(async (path) => ({ path, content: await fetchLogsFromPath(path) }))
+        targetPaths.map(async (path) => ({ path, payload: await fetchLogsFromPath(path) }))
       );
       const successes = settled
         .filter((result) => result.status === "fulfilled")
@@ -2288,9 +2536,14 @@ export default function LogAnalyzer() {
     const first = await readMany(paths);
     if (first.successes.length) {
       const mergedLogs = first.successes
-        .map((item) => `--- PATH: ${item.path} ---\n${item.content}`)
+        .map((item) => `--- PATH: ${item.path} ---\n${item.payload?.content || ""}`)
         .join("\n\n");
-      return { mergedLogs, successes: first.successes.length, failures: first.failures };
+      return {
+        mergedLogs,
+        successes: first.successes.length,
+        failures: first.failures,
+        ...summarizeReadSuccesses(first.successes),
+      };
     }
 
     const remoteHistory = await loadPathHistoryFromConfig();
@@ -2304,9 +2557,14 @@ export default function LogAnalyzer() {
       const retry = await readMany(remapped);
       if (retry.successes.length) {
         const mergedLogs = retry.successes
-          .map((item) => `--- PATH: ${item.path} ---\n${item.content}`)
+          .map((item) => `--- PATH: ${item.path} ---\n${item.payload?.content || ""}`)
           .join("\n\n");
-        return { mergedLogs, successes: retry.successes.length, failures: retry.failures };
+        return {
+          mergedLogs,
+          successes: retry.successes.length,
+          failures: retry.failures,
+          ...summarizeReadSuccesses(retry.successes),
+        };
       }
       const retryError =
         retry.firstError instanceof Error ? retry.firstError.message : "Failed reading all configured paths.";
@@ -2316,6 +2574,30 @@ export default function LogAnalyzer() {
     const firstError =
       first.firstError instanceof Error ? first.firstError.message : "Failed reading all configured paths.";
     throw new Error(`Failed reading all configured paths. ${firstError}`);
+  }
+
+  function buildConfiguredPathReadStatus(readResult, totalPaths) {
+    const parts = [];
+
+    if (readResult.failures) {
+      parts.push(`Read ${readResult.successes}/${totalPaths} paths.`);
+    }
+
+    if (readResult.sharedDirectoryPathsRead > 0) {
+      const filesLabel = readResult.sharedDirectoryFilesRead === 1 ? "file" : "files";
+      const pathsLabel = readResult.sharedDirectoryPathsRead === 1 ? "shared folder path" : "shared folder paths";
+      parts.push(
+        `Shared folder read: ${readResult.sharedDirectoryFilesRead} ${filesLabel} from ${readResult.sharedDirectoryPathsRead} ${pathsLabel}.`
+      );
+    } else if (readResult.directoryPathsRead > 0) {
+      const filesLabel = readResult.directoryFilesRead === 1 ? "file" : "files";
+      const pathsLabel = readResult.directoryPathsRead === 1 ? "folder path" : "folder paths";
+      parts.push(
+        `Folder read: ${readResult.directoryFilesRead} ${filesLabel} from ${readResult.directoryPathsRead} ${pathsLabel}.`
+      );
+    }
+
+    return parts.join(" ");
   }
 
   async function onAnalyze() {
@@ -2331,7 +2613,7 @@ export default function LogAnalyzer() {
         setLogs(readResult.mergedLogs);
         setLastReadAt(new Date().toLocaleString());
         setLastReadTime(Date.now());
-        setError(readResult.failures ? `Read ${readResult.successes}/${parsedPaths.length} paths.` : "");
+        setError(buildConfiguredPathReadStatus(readResult, parsedPaths.length));
         await analyzeLogs(readResult.mergedLogs, true);
         return;
       }
@@ -2562,6 +2844,75 @@ export default function LogAnalyzer() {
                   </button>
                 </div>
               </div>
+
+              <section className="agent-ai-runtime-panel" aria-label="AI mode runtime details">
+                <div className="agent-ai-runtime-grid">
+                  <article className="agent-ai-runtime-card">
+                    <h4>Agent Console Engine</h4>
+                    <p className="muted">{aiRuntimeCapabilities.agentMode.summary}</p>
+                    <p className="agent-ai-runtime-meta">
+                      <span className={`agent-ai-badge ${aiRuntimeCapabilities.agentMode.usesLlm ? "is-llm" : "is-local"}`}>
+                        {aiRuntimeCapabilities.agentMode.usesLlm ? "Uses LLM" : "No LLM"}
+                      </span>
+                      <code>{aiRuntimeCapabilities.agentMode.engine}</code>
+                    </p>
+                  </article>
+
+                  <article className="agent-ai-runtime-card">
+                    <h4>AI Summary (Frontend)</h4>
+                    <p className="muted">{frontendAiSummaryStatus.mode}</p>
+                    <p className="agent-ai-runtime-meta">
+                      <span className={`agent-ai-badge ${frontendAiSummaryStatus.enabled ? "is-active" : ""}`}>
+                        {frontendAiSummaryStatus.enabled ? "Enabled" : "Disabled"}
+                      </span>
+                      {frontendAiSummaryStatus.provider ? <span>{frontendAiSummaryStatus.provider}</span> : null}
+                      {frontendAiSummaryStatus.model ? <code>{frontendAiSummaryStatus.model}</code> : null}
+                    </p>
+                    {frontendAiSummaryStatus.detail ? (
+                      <small className="muted agent-ai-runtime-detail">{frontendAiSummaryStatus.detail}</small>
+                    ) : null}
+                  </article>
+
+                  <article className="agent-ai-runtime-card">
+                    <h4>Web Solutions (Backend)</h4>
+                    <p className="muted">
+                      {aiRuntimeProviderSummary.active}/{aiRuntimeProviderSummary.total || 0} providers active
+                    </p>
+                    <p className="agent-ai-runtime-meta">
+                      <span className="agent-ai-badge is-active">{aiRuntimeProviderSummary.llmActive} LLM-capable active</span>
+                      <span>Limit: {Number(aiRuntimeCapabilities.webSolutions.limit || 0) || WEB_SOLUTION_LIMIT}</span>
+                    </p>
+                    <small className="muted agent-ai-runtime-detail">Runtime config from backend `/api/ai/capabilities`.</small>
+                  </article>
+                </div>
+
+                {aiRuntimeProviderRows.length ? (
+                  <div className="agent-ai-provider-list">
+                    {aiRuntimeProviderRows.map((provider) => (
+                      <div key={provider.id} className={`agent-ai-provider-item ${provider.active ? "is-active" : ""}`}>
+                        <div className="agent-ai-provider-main">
+                          <strong>{provider.label}</strong>
+                          <div className="agent-ai-provider-badges">
+                            <span className={`agent-ai-badge ${provider.active ? "is-active" : ""}`}>
+                              {provider.active ? "Active" : provider.enabled ? "Configured off / missing creds" : "Disabled"}
+                            </span>
+                            <span className={`agent-ai-badge ${provider.usesLlm ? "is-llm" : "is-local"}`}>
+                              {provider.usesLlm ? "LLM" : "Non-LLM"}
+                            </span>
+                            {provider.credentialConfigured ? <span className="agent-ai-badge is-cred">Credential</span> : null}
+                          </div>
+                        </div>
+                        <div className="agent-ai-provider-meta">
+                          {provider.model ? <code>{provider.model}</code> : <span className="muted">No model</span>}
+                          {provider.note ? <small className="muted">{provider.note}</small> : null}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="muted agent-ai-runtime-detail">AI runtime capability data unavailable.</p>
+                )}
+              </section>
 
               <section className="agent-action-mode-panel">
                 <div className="agent-action-mode-header">

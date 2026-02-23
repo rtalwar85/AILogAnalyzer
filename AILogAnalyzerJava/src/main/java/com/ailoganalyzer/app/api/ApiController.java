@@ -4,6 +4,7 @@ import com.ailoganalyzer.app.agent.AgentRunService;
 import com.ailoganalyzer.app.agent.model.AgentRun;
 import com.ailoganalyzer.app.model.LogPayload;
 import com.ailoganalyzer.app.model.WebSolutionResponse;
+import com.ailoganalyzer.app.service.AiSummaryService;
 import com.ailoganalyzer.app.service.LogReadService;
 import com.ailoganalyzer.app.service.PathHistoryService;
 import com.ailoganalyzer.app.service.WebSolutionsService;
@@ -29,16 +30,19 @@ public class ApiController {
   private final LogReadService logReadService;
   private final PathHistoryService pathHistoryService;
   private final WebSolutionsService webSolutionsService;
+  private final AiSummaryService aiSummaryService;
   private final AgentRunService agentRunService;
 
   public ApiController(
       LogReadService logReadService,
       PathHistoryService pathHistoryService,
       WebSolutionsService webSolutionsService,
+      AiSummaryService aiSummaryService,
       AgentRunService agentRunService) {
     this.logReadService = logReadService;
     this.pathHistoryService = pathHistoryService;
     this.webSolutionsService = webSolutionsService;
+    this.aiSummaryService = aiSummaryService;
     this.agentRunService = agentRunService;
   }
 
@@ -120,6 +124,29 @@ public class ApiController {
       return ResponseEntity.ok(response);
     } catch (IllegalArgumentException ex) {
       return badRequest(ex.getMessage());
+    } catch (Exception ex) {
+      return serverError(ex.getMessage());
+    }
+  }
+
+  @PostMapping("/ai-summary")
+  public ResponseEntity<?> aiSummary(@RequestBody(required = false) Map<String, Object> body) {
+    try {
+      Map<String, Object> payload = body == null ? Collections.emptyMap() : body;
+      String logs = payload.get("logs") == null ? "" : payload.get("logs").toString();
+      List<Map<String, Object>> findings = toObjectList(payload.get("findings"));
+      return ResponseEntity.ok(aiSummaryService.summarize(logs, findings));
+    } catch (IllegalArgumentException ex) {
+      return badRequest(ex.getMessage());
+    } catch (Exception ex) {
+      return serverError(ex.getMessage());
+    }
+  }
+
+  @GetMapping("/ai/capabilities")
+  public ResponseEntity<?> getAiCapabilities() {
+    try {
+      return ResponseEntity.ok(webSolutionsService.getAiCapabilities());
     } catch (Exception ex) {
       return serverError(ex.getMessage());
     }
@@ -273,6 +300,20 @@ public class ApiController {
     for (Object item : (List<?>) value) {
       if (item != null) {
         output.add(item.toString());
+      }
+    }
+    return output;
+  }
+
+  private List<Map<String, Object>> toObjectList(Object value) {
+    if (!(value instanceof List<?>)) {
+      return List.of();
+    }
+    List<Map<String, Object>> output = new ArrayList<>();
+    for (Object item : (List<?>) value) {
+      Map<String, Object> map = toObjectMap(item);
+      if (!map.isEmpty()) {
+        output.add(map);
       }
     }
     return output;

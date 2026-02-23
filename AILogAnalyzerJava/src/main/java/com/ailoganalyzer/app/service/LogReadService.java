@@ -64,6 +64,7 @@ import software.amazon.awssdk.services.s3.model.S3Object;
 
 @Service
 public class LogReadService {
+  private static final List<String> LOCAL_ROTATED_FALLBACK_PREFIXES = List.of("systemout", "trace");
   private static final Pattern S3_PATH = Pattern.compile("^s3://([^/]+)/?(.*)$", Pattern.CASE_INSENSITIVE);
   private static final Pattern GS_PATH = Pattern.compile("^gs://([^/]+)/?(.*)$", Pattern.CASE_INSENSITIVE);
   private static final Pattern AZURE_EXPLICIT_PATH =
@@ -133,6 +134,11 @@ public class LogReadService {
         return new LogPayload(resolvedPath.toString(), "file", files, tail.content, meta);
       }
 
+      LogPayload fallbackPayload = buildMissingFilePrefixFallbackPayload(resolvedPath);
+      if (fallbackPayload != null) {
+        return fallbackPayload;
+      }
+
       throw new IllegalStateException("Path must be a file or directory.");
     } catch (IOException exception) {
       throw new IllegalStateException("Unable to read logs: " + exception.getMessage(), exception);
@@ -140,6 +146,12 @@ public class LogReadService {
   }
 
   private List<Path> readDirectoryLogs(Path directoryPath, int maxFiles) throws IOException {
+    List<Path> preferredLogs =
+        readDirectoryLogsByPrefixes(directoryPath, maxFiles, LOCAL_ROTATED_FALLBACK_PREFIXES);
+    if (!preferredLogs.isEmpty()) {
+      return preferredLogs;
+    }
+
     try (Stream<Path> stream = Files.list(directoryPath)) {
       return stream
           .filter(Files::isRegularFile)
@@ -148,6 +160,57 @@ public class LogReadService {
           .limit(Math.max(1, maxFiles))
           .collect(Collectors.toList());
     }
+  }
+
+  private LogPayload buildMissingFilePrefixFallbackPayload(Path requestedPath) throws IOException {
+    Path fileNamePath = requestedPath.getFileName();
+    Path parent = requestedPath.getParent();
+    if (fileNamePath == null || parent == null || !Files.isDirectory(parent)) {
+      return null;
+    }
+
+    String requestedName = fileNamePath.toString();
+    if (!matchesAnyPrefix(requestedName, LOCAL_ROTATED_FALLBACK_PREFIXES)) {
+      return null;
+    }
+
+    List<Path> fallbackLogs = readDirectoryLogsByPrefixes(parent, settings.getMaxFiles(), LOCAL_ROTATED_FALLBACK_PREFIXES);
+    if (fallbackLogs.isEmpty()) {
+      return null;
+    }
+
+    List<FileChunk> fileChunks = new ArrayList<>();
+    for (Path file : fallbackLogs) {
+      TailResult tail = readFileTailUtf8(file, settings.getMaxBytesPerFile());
+      fileChunks.add(new FileChunk(file.toString(), tail.content, tail.totalBytes, tail.truncated));
+    }
+    return buildPayloadFromFileChunks(parent.toString(), "directory", fileChunks);
+  }
+
+  private List<Path> readDirectoryLogsByPrefixes(Path directoryPath, int maxFiles, List<String> prefixes)
+      throws IOException {
+    try (Stream<Path> stream = Files.list(directoryPath)) {
+      return stream
+          .filter(Files::isRegularFile)
+          .filter(path -> isLogLikeFile(path.getFileName().toString()))
+          .filter(path -> matchesAnyPrefix(path.getFileName().toString(), prefixes))
+          .sorted(Comparator.comparingLong(this::safeLastModified).reversed())
+          .limit(Math.max(1, maxFiles))
+          .collect(Collectors.toList());
+    }
+  }
+
+  private boolean matchesAnyPrefix(String fileName, List<String> prefixes) {
+    if (fileName == null) {
+      return false;
+    }
+    String normalized = fileName.toLowerCase(Locale.ROOT);
+    for (String prefix : prefixes) {
+      if (normalized.startsWith(prefix)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private long safeLastModified(Path path) {
