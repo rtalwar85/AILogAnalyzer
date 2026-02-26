@@ -43,6 +43,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -93,9 +94,11 @@ public class LogReadService {
       return buildCloudLogPayload(cloudRef);
     }
 
+    String localPath = rewriteLocalPathAliases(normalized);
+
     Path resolvedPath;
     try {
-      resolvedPath = Paths.get(normalized).toAbsolutePath().normalize();
+      resolvedPath = Paths.get(localPath).toAbsolutePath().normalize();
     } catch (InvalidPathException ex) {
       throw new BadRequestException("Invalid path: " + ex.getInput());
     }
@@ -113,6 +116,143 @@ public class LogReadService {
 
   public String readRawLogs(String inputPath) {
     return readLogs(inputPath).getContent();
+  }
+
+  public LogPayload readFullLogs(String inputPath) {
+    String normalized = PathHistoryService.normalizeInputPath(inputPath);
+    if (!hasText(normalized)) {
+      throw new BadRequestException("Missing query param: path");
+    }
+
+    CloudRef cloudRef = parseCloudPath(normalized);
+    if (cloudRef != null) {
+      throw new BadRequestException("Full log endpoint currently supports local file paths only.");
+    }
+
+    String localPath = rewriteLocalPathAliases(normalized);
+    Path resolvedPath;
+    try {
+      resolvedPath = Paths.get(localPath).toAbsolutePath().normalize();
+    } catch (InvalidPathException ex) {
+      throw new BadRequestException("Invalid path: " + ex.getInput());
+    }
+
+    boolean allowed =
+        settings.isAllowAnyPath()
+            || settings.getAllowedRoots().stream().anyMatch(root -> isWithinRoot(resolvedPath, root));
+    if (!allowed) {
+      throw new PathNotAllowedException(
+          "Path not allowed. Add parent directory to LOG_ALLOWED_ROOTS or set LOG_ALLOW_ANY_PATH=true.");
+    }
+
+    try {
+      if (!Files.isRegularFile(resolvedPath)) {
+        if (Files.isDirectory(resolvedPath)) {
+          throw new BadRequestException("Full log endpoint requires a file path (directories are not supported).");
+        }
+        throw new IllegalStateException("Path must be a file or directory.");
+      }
+
+      long totalBytes = Files.size(resolvedPath);
+      byte[] contentBytes = Files.readAllBytes(resolvedPath);
+      String content = new String(contentBytes, StandardCharsets.UTF_8);
+      String filePath = resolvedPath.toString();
+      return new LogPayload(
+          filePath,
+          "file",
+          List.of(filePath),
+          content,
+          List.of(new FileMeta(filePath, totalBytes, false)));
+    } catch (IOException exception) {
+      throw new IllegalStateException("Unable to read logs: " + exception.getMessage(), exception);
+    }
+  }
+
+  public String readFullRawLogs(String inputPath) {
+    return readFullLogs(inputPath).getContent();
+  }
+
+  private String rewriteLocalPathAliases(String inputPath) {
+    if (!hasText(inputPath)) {
+      return "";
+    }
+    Map<String, String> aliases = settings.getPathAliasMappings();
+    if (aliases == null || aliases.isEmpty()) {
+      return inputPath;
+    }
+
+    String inputCanonical = canonicalizeForAliasMatch(inputPath, false);
+    String inputCanonicalLower = inputCanonical.toLowerCase(Locale.ROOT);
+
+    for (Map.Entry<String, String> entry : aliases.entrySet()) {
+      String fromRaw = safe(entry.getKey()).trim();
+      String toRaw = safe(entry.getValue()).trim();
+      if (!hasText(fromRaw) || !hasText(toRaw)) {
+        continue;
+      }
+
+      String fromCanonical = canonicalizeForAliasMatch(fromRaw, false);
+      if (!hasText(fromCanonical)) {
+        continue;
+      }
+
+      String fromCanonicalLower = fromCanonical.toLowerCase(Locale.ROOT);
+      if (!inputCanonicalLower.startsWith(fromCanonicalLower)) {
+        continue;
+      }
+
+      if (inputCanonical.length() > fromCanonical.length()) {
+        char nextChar = inputCanonical.charAt(fromCanonical.length());
+        if (nextChar != '/') {
+          continue;
+        }
+      }
+
+      String suffix = inputCanonical.length() <= fromCanonical.length()
+          ? ""
+          : inputCanonical.substring(fromCanonical.length());
+      while (suffix.startsWith("/")) {
+        suffix = suffix.substring(1);
+      }
+
+      String target = toRaw;
+      if (target.contains("\\") && !target.contains("/")) {
+        String windowsSuffix = suffix.replace('/', '\\');
+        return windowsSuffix.isEmpty()
+            ? target
+            : (target.endsWith("\\") ? target + windowsSuffix : target + "\\" + windowsSuffix);
+      }
+
+      String unixTarget = target.replace('\\', '/');
+      return suffix.isEmpty()
+          ? unixTarget
+          : (unixTarget.endsWith("/") ? unixTarget + suffix : unixTarget + "/" + suffix);
+    }
+
+    return inputPath;
+  }
+
+  private String canonicalizeForAliasMatch(String raw) {
+    return canonicalizeForAliasMatch(raw, true);
+  }
+
+  private String canonicalizeForAliasMatch(String raw, boolean trimTrailingSlash) {
+    String value = safe(raw).trim().replace('\\', '/');
+    if (!hasText(value)) {
+      return "";
+    }
+    while (value.contains("//")) {
+      value = value.replace("//", "/");
+    }
+    if (safe(raw).startsWith("\\\\") || safe(raw).startsWith("//")) {
+      value = "/" + value;
+    }
+    if (trimTrailingSlash) {
+      while (value.length() > 1 && value.endsWith("/")) {
+        value = value.substring(0, value.length() - 1);
+      }
+    }
+    return value;
   }
 
   private LogPayload buildLocalLogPayload(Path resolvedPath) {

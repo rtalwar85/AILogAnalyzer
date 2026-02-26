@@ -8,6 +8,14 @@ import com.ailoganalyzer.app.service.AiSummaryService;
 import com.ailoganalyzer.app.service.LogReadService;
 import com.ailoganalyzer.app.service.PathHistoryService;
 import com.ailoganalyzer.app.service.WebSolutionsService;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URI;
+import java.net.Proxy;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -32,18 +40,21 @@ public class ApiController {
   private final WebSolutionsService webSolutionsService;
   private final AiSummaryService aiSummaryService;
   private final AgentRunService agentRunService;
+  private final ObjectMapper objectMapper;
 
   public ApiController(
       LogReadService logReadService,
       PathHistoryService pathHistoryService,
       WebSolutionsService webSolutionsService,
       AiSummaryService aiSummaryService,
-      AgentRunService agentRunService) {
+      AgentRunService agentRunService,
+      ObjectMapper objectMapper) {
     this.logReadService = logReadService;
     this.pathHistoryService = pathHistoryService;
     this.webSolutionsService = webSolutionsService;
     this.aiSummaryService = aiSummaryService;
     this.agentRunService = agentRunService;
+    this.objectMapper = objectMapper;
   }
 
   @GetMapping("/logs")
@@ -64,6 +75,34 @@ public class ApiController {
   public ResponseEntity<String> readRawLogs(@RequestParam(name = "path", required = false) String path) {
     try {
       return ResponseEntity.ok(logReadService.readRawLogs(path));
+    } catch (LogReadService.BadRequestException ex) {
+      return ResponseEntity.badRequest().contentType(MediaType.TEXT_PLAIN).body(ex.getMessage());
+    } catch (LogReadService.PathNotAllowedException ex) {
+      return ResponseEntity.status(403).contentType(MediaType.TEXT_PLAIN).body(ex.getMessage());
+    } catch (Exception ex) {
+      return ResponseEntity.status(500).contentType(MediaType.TEXT_PLAIN).body(safeMessage(ex));
+    }
+  }
+
+  @GetMapping("/logs/full")
+  public ResponseEntity<?> readFullLogs(@RequestParam(name = "path", required = false) String path) {
+    try {
+      LogPayload payload = logReadService.readFullLogs(path);
+      return ResponseEntity.ok(payload);
+    } catch (LogReadService.BadRequestException ex) {
+      return badRequest(ex.getMessage());
+    } catch (LogReadService.PathNotAllowedException ex) {
+      return forbidden(ex.getMessage());
+    } catch (Exception ex) {
+      return serverError(ex.getMessage());
+    }
+  }
+
+  @GetMapping(value = "/logs/raw/full", produces = MediaType.TEXT_PLAIN_VALUE)
+  public ResponseEntity<String> readFullRawLogs(
+      @RequestParam(name = "path", required = false) String path) {
+    try {
+      return ResponseEntity.ok(logReadService.readFullRawLogs(path));
     } catch (LogReadService.BadRequestException ex) {
       return ResponseEntity.badRequest().contentType(MediaType.TEXT_PLAIN).body(ex.getMessage());
     } catch (LogReadService.PathNotAllowedException ex) {
@@ -136,6 +175,46 @@ public class ApiController {
       String logs = payload.get("logs") == null ? "" : payload.get("logs").toString();
       List<Map<String, Object>> findings = toObjectList(payload.get("findings"));
       return ResponseEntity.ok(aiSummaryService.summarize(logs, findings));
+    } catch (IllegalArgumentException ex) {
+      return badRequest(ex.getMessage());
+    } catch (Exception ex) {
+      return serverError(ex.getMessage());
+    }
+  }
+
+  @PostMapping("/webhook-relay")
+  public ResponseEntity<?> relayWebhook(@RequestBody(required = false) Map<String, Object> body) {
+    try {
+      Map<String, Object> payload = body == null ? Collections.emptyMap() : body;
+      String url = payload.get("url") == null ? "" : payload.get("url").toString().trim();
+      if (url.isEmpty()) {
+        return badRequest("Missing webhook url.");
+      }
+      if (!isHttpUrl(url)) {
+        return badRequest("Webhook url must start with http:// or https://");
+      }
+
+      Object forwardedPayloadValue = payload.get("payload");
+      Map<String, Object> forwardedPayload =
+          forwardedPayloadValue instanceof Map<?, ?>
+              ? toObjectMap(forwardedPayloadValue)
+              : buildDefaultWebhookPayload(payload);
+      if (forwardedPayload.isEmpty()) {
+        return badRequest("Missing payload to forward.");
+      }
+
+      int timeoutSeconds = clamp(toInteger(payload.get("timeoutSeconds")), 1, 300, 20);
+      String requestBody = objectMapper.writeValueAsString(forwardedPayload);
+      RelayResponse relayResponse = postJsonWebhook(url, requestBody, timeoutSeconds);
+      int downstreamStatus = relayResponse.statusCode;
+      String responseBody = relayResponse.body;
+
+      Map<String, Object> result = new LinkedHashMap<>();
+      result.put("ok", downstreamStatus >= 200 && downstreamStatus < 300);
+      result.put("status", downstreamStatus);
+      result.put("url", url);
+      result.put("responseBody", responseBody == null ? "" : responseBody);
+      return ResponseEntity.status(downstreamStatus).body(result);
     } catch (IllegalArgumentException ex) {
       return badRequest(ex.getMessage());
     } catch (Exception ex) {
@@ -330,6 +409,81 @@ public class ApiController {
       return Integer.parseInt(value.toString().trim());
     } catch (Exception ignored) {
       return null;
+    }
+  }
+
+  private int clamp(Integer value, int min, int max, int fallback) {
+    int safe = value == null ? fallback : value;
+    return Math.max(min, Math.min(max, safe));
+  }
+
+  private RelayResponse postJsonWebhook(String url, String requestBody, int timeoutSeconds) throws Exception {
+    HttpURLConnection connection = null;
+    try {
+      URL targetUrl = URI.create(url).toURL();
+      connection = (HttpURLConnection) targetUrl.openConnection(Proxy.NO_PROXY);
+      connection.setRequestMethod("POST");
+      connection.setDoOutput(true);
+      connection.setConnectTimeout((int) Duration.ofSeconds(Math.max(1, timeoutSeconds)).toMillis());
+      connection.setReadTimeout((int) Duration.ofSeconds(Math.max(1, timeoutSeconds)).toMillis());
+      connection.setRequestProperty("Content-Type", "application/json");
+      connection.setRequestProperty("Accept", "application/json, text/plain, */*");
+      connection.setRequestProperty("Connection", "close");
+
+      byte[] bodyBytes = requestBody == null ? new byte[0] : requestBody.getBytes(StandardCharsets.UTF_8);
+      connection.setFixedLengthStreamingMode(bodyBytes.length);
+      connection.connect();
+      if (bodyBytes.length > 0) {
+        connection.getOutputStream().write(bodyBytes);
+      }
+
+      int statusCode = connection.getResponseCode();
+      InputStream stream = statusCode >= 400 ? connection.getErrorStream() : connection.getInputStream();
+      String body = "";
+      if (stream != null) {
+        try (InputStream in = stream) {
+          body = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+        }
+      }
+      return new RelayResponse(statusCode, body);
+    } finally {
+      if (connection != null) {
+        connection.disconnect();
+      }
+    }
+  }
+
+  private boolean isHttpUrl(String value) {
+    String normalized = value == null ? "" : value.trim().toLowerCase();
+    return normalized.startsWith("http://") || normalized.startsWith("https://");
+  }
+
+  private Map<String, Object> buildDefaultWebhookPayload(Map<String, Object> source) {
+    Map<String, Object> payload = new LinkedHashMap<>();
+    copyIfPresent(payload, "source", source.get("source"));
+    copyIfPresent(payload, "environment", source.get("environment"));
+    copyIfPresent(payload, "logText", source.get("logText"));
+    copyIfPresent(payload, "path", source.get("path"));
+    copyIfPresent(payload, "paths", source.get("paths"));
+    copyIfPresent(payload, "mode", source.get("mode"));
+    copyIfPresent(payload, "sentAt", source.get("sentAt"));
+    copyIfPresent(payload, "meta", source.get("meta"));
+    return payload;
+  }
+
+  private void copyIfPresent(Map<String, Object> target, String key, Object value) {
+    if (value != null) {
+      target.put(key, value);
+    }
+  }
+
+  private static class RelayResponse {
+    final int statusCode;
+    final String body;
+
+    RelayResponse(int statusCode, String body) {
+      this.statusCode = statusCode;
+      this.body = body == null ? "" : body;
     }
   }
 

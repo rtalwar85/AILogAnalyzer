@@ -1356,6 +1356,13 @@ export default defineConfig(({ mode }) => {
   });
 
   return {
+    server: {
+      proxy: {
+        "/api/webhook-relay": "http://localhost:8080",
+        "/api/logs/full": "http://localhost:8080",
+        "/api/logs/raw/full": "http://localhost:8080",
+      },
+    },
     plugins: [
       react({
         babel: {

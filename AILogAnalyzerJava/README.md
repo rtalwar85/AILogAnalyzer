@@ -51,6 +51,56 @@ mvn clean package
 java -jar target/ailoganalyzer-java11-1.0.0.jar
 ```
 
+## Run With Docker (Recommended for easy setup)
+
+This repo includes:
+
+- `AILogAnalyzerJava/Dockerfile` (multi-stage build, Java 11)
+- `docker-compose.ailoganalyzer.yml` (runtime config + volume mounts)
+
+### 1. Put logs in a host folder (or change the mount)
+
+By default, Docker mounts `./logs` into the container as `/logs` (read-only).
+
+- Create `logs` at the repo root and place your log files there
+- Or edit `docker-compose.ailoganalyzer.yml` to mount a different host path
+
+### 2. (Optional) Add API keys to root `.env`
+
+`docker compose` will substitute environment variables from the repo root `.env` file if present.
+
+Examples:
+
+- `OPENAI_API_KEY`
+- `GEMINI_API_KEY`
+- `GROQ_API_KEY`
+- `OPENROUTER_API_KEY`
+- `GITHUB_TOKEN`
+
+### 3. Start the container
+
+From the repo root (`first-react`):
+
+```bash
+docker compose -f docker-compose.ailoganalyzer.yml up --build -d
+```
+
+### 4. Open the app
+
+- `http://localhost:8080`
+
+### 5. Stop the container
+
+```bash
+docker compose -f docker-compose.ailoganalyzer.yml down
+```
+
+### Notes for Docker usage
+
+- The app runs inside the container, so local file reads only work for mounted paths (default `/logs`).
+- `LOG_ALLOWED_ROOTS` is set to `/logs` in the compose file.
+- Path history/preferences are stored in `./docker-data/ailoganalyzer`.
+
 ## Important environment variables
 
 - `LOG_ALLOWED_ROOTS`

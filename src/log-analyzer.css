@@ -837,6 +837,61 @@
   margin-bottom: 0.5rem;
 }
 
+.webhook-share-panel {
+  margin: 0.65rem 0 0.85rem;
+  border: 1px solid #d9e5f9;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #fbfdff 0%, #f3f7ff 100%);
+  padding: 0.7rem;
+}
+
+.webhook-share-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+}
+
+.webhook-share-header > div {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.webhook-share-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.7rem;
+  margin-top: 0.7rem;
+}
+
+.webhook-share-url {
+  grid-column: 1 / -1;
+}
+
+.webhook-share-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+  margin-top: 0.65rem;
+}
+
+.webhook-share-controls .watch-toggle {
+  margin-bottom: 0;
+}
+
+.webhook-share-status {
+  display: block;
+  margin-top: 0.45rem;
+  color: #16477c;
+}
+
+.webhook-share-error {
+  margin-top: 0.35rem;
+}
+
 .path-suggest-row {
   display: flex;
   align-items: flex-end;

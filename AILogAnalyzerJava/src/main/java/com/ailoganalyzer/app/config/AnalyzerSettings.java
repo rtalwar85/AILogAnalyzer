@@ -33,6 +33,7 @@ public class AnalyzerSettings {
   private final int maxBytesPerFile;
   private final int pathHistoryLimit;
   private final Path configFilePath;
+  private final Map<String, String> pathAliasMappings;
   private final boolean cloudEnabled;
   private final Set<String> allowedCloudProviders;
   private final String awsRegion;
@@ -89,6 +90,7 @@ public class AnalyzerSettings {
         hasText(rawConfigPath)
             ? Paths.get(rawConfigPath).toAbsolutePath().normalize()
             : Paths.get(userDir, ".log-analyzer.config.json").toAbsolutePath().normalize();
+    this.pathAliasMappings = parsePathAliasMappings(readFirst("LOG_PATH_ALIAS_MAP"));
 
     this.cloudEnabled = !"false".equalsIgnoreCase(readFirst("LOG_ENABLE_CLOUD_PATHS"));
     this.allowedCloudProviders = parseCloudProviders(readFirst("LOG_CLOUD_PROVIDERS"));
@@ -184,6 +186,38 @@ public class AnalyzerSettings {
       providers.add("azure");
     }
     return providers;
+  }
+
+  private static Map<String, String> parsePathAliasMappings(String raw) {
+    Map<String, String> mappings = new LinkedHashMap<>();
+    if (!hasText(raw)) {
+      return mappings;
+    }
+
+    for (String token : raw.split("[;\\n\\r]+")) {
+      String item = token == null ? "" : token.trim();
+      if (!hasText(item)) {
+        continue;
+      }
+
+      int separator = item.indexOf("=>");
+      int separatorLength = 2;
+      if (separator < 0) {
+        separator = item.indexOf('=');
+        separatorLength = 1;
+      }
+      if (separator <= 0) {
+        continue;
+      }
+
+      String from = item.substring(0, separator).trim();
+      String to = item.substring(separator + separatorLength).trim();
+      if (!hasText(from) || !hasText(to)) {
+        continue;
+      }
+      mappings.put(from, to);
+    }
+    return mappings;
   }
 
   private static String normalizeCloudProviderName(String value) {
@@ -346,6 +380,10 @@ public class AnalyzerSettings {
 
   public boolean isCloudEnabled() {
     return cloudEnabled;
+  }
+
+  public Map<String, String> getPathAliasMappings() {
+    return pathAliasMappings;
   }
 
   public Set<String> getAllowedCloudProviders() {

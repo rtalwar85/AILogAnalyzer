@@ -28,6 +28,7 @@ const STORAGE_KEYS = {
   pathHistory: "log_analyzer_path_history",
   pathAliases: "log_analyzer_path_aliases",
   searchPreferences: "log_analyzer_search_preferences",
+  webhookShare: "log_analyzer_webhook_share",
 };
 
 const RULES = [
@@ -881,6 +882,18 @@ function normalizeSearchPreferences(input) {
   };
 }
 
+function normalizeWebhookShareSettings(input) {
+  const source = input && typeof input === "object" ? input : {};
+  return {
+    panelOpen: normalizeBoolPreference(source.panelOpen, false),
+    url: String(source.url || "").trim().slice(0, 2000),
+    source: String(source.source || "").trim().slice(0, 160),
+    environment: String(source.environment || "").trim().slice(0, 64),
+    intervalSeconds: normalizePollSecondsPreference(source.intervalSeconds),
+    includeFullLogs: normalizeBoolPreference(source.includeFullLogs, false),
+  };
+}
+
 async function loadPathHistoryFromConfig() {
   try {
     const response = await fetch("/api/path-history", { method: "GET" });
@@ -1407,9 +1420,12 @@ async function analyzeWithAI(rawLogs, findings) {
   return content ? JSON.parse(content) : null;
 }
 
-async function fetchLogsFromPath(path) {
+async function fetchLogsFromPath(path, options = {}) {
   const normalizedPath = normalizePathInput(path);
-  const watchEndpoint = import.meta.env.VITE_LOG_WATCH_ENDPOINT || "/api/logs";
+  const useFullLogs = Boolean(options?.full);
+  const watchEndpoint = useFullLogs
+    ? import.meta.env.VITE_LOG_FULL_ENDPOINT || "/api/logs/full"
+    : import.meta.env.VITE_LOG_WATCH_ENDPOINT || "/api/logs";
   const url = `${watchEndpoint}?path=${encodeURIComponent(normalizedPath)}`;
   const response = await fetch(url, { method: "GET" });
 
@@ -1465,6 +1481,10 @@ export default function LogAnalyzer() {
     normalizeSearchPreferences(safeReadStorage(STORAGE_KEYS.searchPreferences, {}))
   );
   const initialSearchPreferences = initialSearchPreferencesRef.current;
+  const initialWebhookShareSettingsRef = useRef(
+    normalizeWebhookShareSettings(safeReadStorage(STORAGE_KEYS.webhookShare, {}))
+  );
+  const initialWebhookShareSettings = initialWebhookShareSettingsRef.current;
 
   const [logs, setLogs] = useState("");
   const [findings, setFindings] = useState([]);
@@ -1507,6 +1527,26 @@ export default function LogAnalyzer() {
   const [pathListInput, setPathListInput] = useState("");
   const [autoRead, setAutoRead] = useState(initialSearchPreferences.autoRead);
   const [pollSeconds, setPollSeconds] = useState(initialSearchPreferences.pollSeconds);
+  const [showWebhookSharePanel, setShowWebhookSharePanel] = useState(
+    initialWebhookShareSettings.panelOpen
+  );
+  const [webhookShareEnabled, setWebhookShareEnabled] = useState(false);
+  const [webhookShareUrl, setWebhookShareUrl] = useState(initialWebhookShareSettings.url);
+  const [webhookShareSource, setWebhookShareSource] = useState(initialWebhookShareSettings.source);
+  const [webhookShareEnvironment, setWebhookShareEnvironment] = useState(
+    initialWebhookShareSettings.environment
+  );
+  const [webhookShareIntervalSeconds, setWebhookShareIntervalSeconds] = useState(
+    initialWebhookShareSettings.intervalSeconds
+  );
+  const [webhookShareIncludeFullLogs, setWebhookShareIncludeFullLogs] = useState(
+    initialWebhookShareSettings.includeFullLogs
+  );
+  const [webhookShareBusy, setWebhookShareBusy] = useState(false);
+  const [webhookShareError, setWebhookShareError] = useState("");
+  const [webhookShareLastSentAt, setWebhookShareLastSentAt] = useState("");
+  const [webhookShareLastSentTime, setWebhookShareLastSentTime] = useState(null);
+  const [webhookShareStatus, setWebhookShareStatus] = useState("");
   const frontendAiSummaryStatus = useMemo(() => getFrontendAiSummaryStatus(), []);
   const [lastReadAt, setLastReadAt] = useState("");
   const [lastReadTime, setLastReadTime] = useState(null);
@@ -1543,6 +1583,7 @@ export default function LogAnalyzer() {
   const [preferencesReady, setPreferencesReady] = useState(false);
   const problemTypeDropdownRef = useRef(null);
   const exclusionDropdownRef = useRef(null);
+  const webhookShareInFlightRef = useRef(false);
 
   const hasConfig = useMemo(
     () =>
@@ -1784,6 +1825,25 @@ export default function LogAnalyzer() {
     autoRead,
     pollSeconds,
     webSourcePriority,
+  ]);
+
+  useEffect(() => {
+    const settings = normalizeWebhookShareSettings({
+      panelOpen: showWebhookSharePanel,
+      url: webhookShareUrl,
+      source: webhookShareSource,
+      environment: webhookShareEnvironment,
+      intervalSeconds: webhookShareIntervalSeconds,
+      includeFullLogs: webhookShareIncludeFullLogs,
+    });
+    safeWriteStorage(STORAGE_KEYS.webhookShare, settings);
+  }, [
+    showWebhookSharePanel,
+    webhookShareUrl,
+    webhookShareSource,
+    webhookShareEnvironment,
+    webhookShareIntervalSeconds,
+    webhookShareIncludeFullLogs,
   ]);
 
   useEffect(() => {
@@ -2591,7 +2651,7 @@ export default function LogAnalyzer() {
     });
   }
 
-  async function readConfiguredPathsOnce(paths) {
+  async function readConfiguredPathsOnce(paths, options = {}) {
     function summarizeReadSuccesses(successes) {
       let directoryPathsRead = 0;
       let directoryFilesRead = 0;
@@ -2629,7 +2689,10 @@ export default function LogAnalyzer() {
 
     async function readMany(targetPaths) {
       const settled = await Promise.allSettled(
-        targetPaths.map(async (path) => ({ path, payload: await fetchLogsFromPath(path) }))
+        targetPaths.map(async (path) => ({
+          path,
+          payload: await fetchLogsFromPath(path, options),
+        }))
       );
       const successes = settled
         .filter((result) => result.status === "fulfilled")
@@ -2681,6 +2744,194 @@ export default function LogAnalyzer() {
       first.firstError instanceof Error ? first.firstError.message : "Failed reading all configured paths.";
     throw new Error(`Failed reading all configured paths. ${firstError}`);
   }
+
+  async function shareLogsToWebhook(reason = "manual", options = {}) {
+    if (webhookShareInFlightRef.current) {
+      return;
+    }
+
+    const targetUrl = String(webhookShareUrl || "").trim();
+    if (!targetUrl) {
+      throw new Error("Add a webhook URL before sharing logs.");
+    }
+
+    webhookShareInFlightRef.current = true;
+    if (!options.silentBusy) {
+      setWebhookShareBusy(true);
+    }
+    setWebhookShareError("");
+
+    try {
+      const shouldReadFresh =
+        parsedPaths.length > 0 && (webhookShareIncludeFullLogs || !autoRead || !String(logs || "").trim());
+
+      let mergedLogs = String(logs || "");
+      let shareMode = parsedPaths.length ? "tail-current" : "manual";
+      let readSummary = null;
+
+      if (shouldReadFresh) {
+        const readResult = await readConfiguredPathsOnce(parsedPaths, {
+          full: webhookShareIncludeFullLogs,
+        });
+        mergedLogs = readResult.mergedLogs;
+        shareMode = webhookShareIncludeFullLogs ? "full" : "tail-fresh";
+        readSummary = readResult;
+
+        setUploadedFileLinks({});
+        setLogs(readResult.mergedLogs);
+        setLastReadAt(new Date().toLocaleString());
+        setLastReadTime(Date.now());
+      } else if (parsedPaths.length) {
+        shareMode = autoRead ? "tail-current-auto-read" : "tail-current";
+      }
+
+      if (!String(mergedLogs || "").trim()) {
+        throw new Error("No log content available to share. Add a path or paste logs first.");
+      }
+
+      const firstPath = parsedPaths[0] || "";
+      const aliasKey = normalizePathInput(firstPath).toLowerCase();
+      const fallbackSource =
+        (aliasKey && normalizedPathAliases[aliasKey]) ||
+        (firstPath ? sourceNameFromPath(firstPath) : "manual");
+      const payloadSource = webhookShareSource.trim() || fallbackSource || "manual";
+      const payloadEnvironment = webhookShareEnvironment.trim() || envLabel || "LOCAL";
+      const sentAtIso = new Date().toISOString();
+
+      const relayBody = {
+        url: targetUrl,
+        timeoutSeconds: 30,
+        payload: {
+          source: payloadSource,
+          environment: payloadEnvironment,
+          logText: mergedLogs,
+          mode: shareMode,
+          path: parsedPaths.length === 1 ? parsedPaths[0] : "",
+          paths: parsedPaths,
+          sentAt: sentAtIso,
+          meta: {
+            reason,
+            autoReadEnabled: Boolean(autoRead),
+            includeFullLogs: Boolean(webhookShareIncludeFullLogs),
+            intervalSeconds: Number.parseInt(webhookShareIntervalSeconds, 10) || 30,
+            pathCount: parsedPaths.length,
+            chars: mergedLogs.length,
+            bytesApproxUtf8: new Blob([mergedLogs]).size,
+            readSummary:
+              readSummary && typeof readSummary === "object"
+                ? {
+                    successes: readSummary.successes || 0,
+                    failures: readSummary.failures || 0,
+                    directoryPathsRead: readSummary.directoryPathsRead || 0,
+                    directoryFilesRead: readSummary.directoryFilesRead || 0,
+                    sharedDirectoryPathsRead: readSummary.sharedDirectoryPathsRead || 0,
+                    sharedDirectoryFilesRead: readSummary.sharedDirectoryFilesRead || 0,
+                  }
+                : null,
+          },
+        },
+      };
+
+      const response = await fetch("/api/webhook-relay", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(relayBody),
+      });
+
+      let responsePayload = null;
+      let responseText = "";
+      const contentType = response.headers.get("content-type") || "";
+      if (contentType.includes("application/json")) {
+        responsePayload = await response.json();
+      } else {
+        responseText = await response.text();
+      }
+
+      if (!response.ok) {
+        let downstreamBodyMessage = "";
+        const downstreamBody =
+          typeof responsePayload?.responseBody === "string" ? responsePayload.responseBody.trim() : "";
+        if (downstreamBody) {
+          try {
+            const parsed = JSON.parse(downstreamBody);
+            if (parsed && typeof parsed === "object") {
+              const parts = [];
+              if (typeof parsed.message === "string" && parsed.message.trim()) {
+                parts.push(parsed.message.trim());
+              }
+              if (typeof parsed.hint === "string" && parsed.hint.trim()) {
+                parts.push(parsed.hint.trim());
+              }
+              if (typeof parsed.error === "string" && parsed.error.trim()) {
+                parts.push(parsed.error.trim());
+              }
+              downstreamBodyMessage = parts.join(" ");
+            }
+          } catch {
+            downstreamBodyMessage = downstreamBody;
+          }
+        }
+
+        const relayMessageDetail =
+          (typeof responsePayload?.error === "string" && responsePayload.error.trim()) ||
+          downstreamBodyMessage ||
+          downstreamBody ||
+          (typeof responseText === "string" ? responseText.trim() : "");
+        const relayMessage = relayMessageDetail
+          ? `Webhook call failed with status ${response.status}. ${relayMessageDetail}`
+          : `Webhook call failed with status ${response.status}.`;
+        throw new Error(relayMessage);
+      }
+
+      const statusLabel = Number(responsePayload?.status || response.status);
+      setWebhookShareLastSentAt(new Date().toLocaleString());
+      setWebhookShareLastSentTime(Date.now());
+      setWebhookShareStatus(
+        `Sent ${mergedLogs.length.toLocaleString()} chars (${shareMode}) to webhook. Downstream status: ${statusLabel}.`
+      );
+    } catch (exception) {
+      const message =
+        exception instanceof Error ? exception.message : "Failed sharing logs to webhook.";
+      setWebhookShareError(message);
+      setWebhookShareStatus("");
+      throw exception;
+    } finally {
+      webhookShareInFlightRef.current = false;
+      if (!options.silentBusy) {
+        setWebhookShareBusy(false);
+      }
+    }
+  }
+
+  const webhookShareSenderRef = useRef(null);
+
+  useEffect(() => {
+    webhookShareSenderRef.current = shareLogsToWebhook;
+  });
+
+  useEffect(() => {
+    if (!webhookShareEnabled) return;
+
+    if (!webhookShareUrl.trim()) {
+      setWebhookShareEnabled(false);
+      setWebhookShareError("Add a webhook URL before turning on live share.");
+      return;
+    }
+
+    const parsedInterval = Number.parseInt(webhookShareIntervalSeconds, 10);
+    const intervalMs = Number.isNaN(parsedInterval)
+      ? 30000
+      : Math.min(Math.max(parsedInterval, 1), 3600) * 1000;
+
+    const timer = setInterval(() => {
+      if (!webhookShareSenderRef.current) return;
+      void webhookShareSenderRef.current("timer", { silentBusy: true }).catch(() => {});
+    }, intervalMs);
+
+    return () => {
+      clearInterval(timer);
+    };
+  }, [webhookShareEnabled, webhookShareUrl, webhookShareIntervalSeconds]);
 
   function buildConfiguredPathReadStatus(readResult, totalPaths) {
     const parts = [];
@@ -3668,6 +3919,128 @@ export default function LogAnalyzer() {
           Continuous read requires `VITE_LOG_WATCH_ENDPOINT` (default `/api/logs`) and supports
           `?path=...` for local, `s3://`, `gs://`, and `az://` paths.
         </small>
+
+        <section className="webhook-share-panel">
+          <div className="webhook-share-header">
+            <div>
+              <strong>Live Webhook Share</strong>
+              <small className="muted">
+                Send live logs to n8n/webhooks on a timer (uses backend relay to avoid browser CORS).
+              </small>
+            </div>
+            <button
+              type="button"
+              className="action-button action-ghost"
+              onClick={() => setShowWebhookSharePanel((prev) => !prev)}
+              aria-expanded={showWebhookSharePanel}
+            >
+              {showWebhookSharePanel ? "Hide share options" : "Share Logs"}
+            </button>
+          </div>
+
+          {showWebhookSharePanel ? (
+            <>
+              <div className="webhook-share-grid">
+                <div className="filter-field webhook-share-url">
+                  <label htmlFor="webhook-share-url">Webhook URL</label>
+                  <input
+                    id="webhook-share-url"
+                    type="url"
+                    placeholder="http://localhost:5678/webhook/hclc-log-ai"
+                    value={webhookShareUrl}
+                    onChange={(event) => setWebhookShareUrl(event.target.value)}
+                  />
+                </div>
+                <div className="filter-field">
+                  <label htmlFor="webhook-share-source">Source (optional)</label>
+                  <input
+                    id="webhook-share-source"
+                    type="text"
+                    placeholder={parsedPaths[0] ? sourceNameFromPath(parsedPaths[0]) : "server1"}
+                    value={webhookShareSource}
+                    onChange={(event) => setWebhookShareSource(event.target.value)}
+                  />
+                </div>
+                <div className="filter-field">
+                  <label htmlFor="webhook-share-environment">Environment</label>
+                  <input
+                    id="webhook-share-environment"
+                    type="text"
+                    placeholder={envLabel || "TST"}
+                    value={webhookShareEnvironment}
+                    onChange={(event) => setWebhookShareEnvironment(event.target.value)}
+                  />
+                </div>
+                <div className="filter-field">
+                  <label htmlFor="webhook-share-interval">Share every (seconds)</label>
+                  <input
+                    id="webhook-share-interval"
+                    type="number"
+                    min="1"
+                    max="3600"
+                    value={webhookShareIntervalSeconds}
+                    onChange={(event) => setWebhookShareIntervalSeconds(event.target.value)}
+                  />
+                </div>
+              </div>
+
+              <div className="webhook-share-controls">
+                <label className="watch-toggle" htmlFor="webhook-share-full">
+                  <input
+                    id="webhook-share-full"
+                    type="checkbox"
+                    checked={webhookShareIncludeFullLogs}
+                    onChange={(event) => setWebhookShareIncludeFullLogs(event.target.checked)}
+                  />
+                  Send full logs (file paths only)
+                </label>
+
+                <button
+                  type="button"
+                  className={`action-button action-toggle ${webhookShareEnabled ? "is-active" : ""}`}
+                  onClick={() => {
+                    if (!webhookShareEnabled && !webhookShareUrl.trim()) {
+                      setShowWebhookSharePanel(true);
+                      setWebhookShareError("Add a webhook URL before turning on live share.");
+                      return;
+                    }
+                    setWebhookShareError("");
+                    setWebhookShareEnabled((prev) => !prev);
+                  }}
+                >
+                  {webhookShareEnabled ? "Live Share: On" : "Live Share: Off"}
+                </button>
+
+                <button
+                  type="button"
+                  className="action-button action-accent"
+                  disabled={webhookShareBusy}
+                  onClick={() => {
+                    void shareLogsToWebhook("manual").catch(() => {});
+                  }}
+                >
+                  {webhookShareBusy ? "Sending..." : "Send Now"}
+                </button>
+
+                {webhookShareLastSentAt ? (
+                  <small>
+                    Last sent: {webhookShareLastSentAt}
+                    {webhookShareLastSentTime ? ` (${formatRelativeTime(webhookShareLastSentTime)})` : ""}
+                  </small>
+                ) : null}
+              </div>
+
+              {webhookShareStatus ? (
+                <small className="webhook-share-status">{webhookShareStatus}</small>
+              ) : null}
+              {webhookShareError ? <p className="error webhook-share-error">{webhookShareError}</p> : null}
+              <small className="muted">
+                Timer shares the currently loaded logs. If Auto Read is off, it will read configured paths
+                before sending. For n8n test mode use `/webhook-test/...`; for active workflows use `/webhook/...`.
+              </small>
+            </>
+          ) : null}
+        </section>
 
         <label htmlFor="log-file">Upload logs (up to 30 files)</label>
         <input
