@@ -203,7 +203,7 @@ public class ApiController {
         return badRequest("Missing payload to forward.");
       }
 
-      int timeoutSeconds = clamp(toInteger(payload.get("timeoutSeconds")), 1, 300, 20);
+      int timeoutSeconds = clamp(toInteger(payload.get("timeoutSeconds")), 1, 300, 120);
       String requestBody = objectMapper.writeValueAsString(forwardedPayload);
       RelayResponse relayResponse = postJsonWebhook(url, requestBody, timeoutSeconds);
       int downstreamStatus = relayResponse.statusCode;

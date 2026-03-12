@@ -29,3 +29,10 @@ dist-ssr
 
 # Local nested workspace
 first-reactnpm/
+.n8n/
+*.sqlite
+*.db
+.env
+.env.*
+.n8n-recovery.*
+printf "\n# local secrets\n.n8n/\nn8n-recovery/\n*.sqlite\n*.db\n.env\n.env.*\n" >> .gitignore
